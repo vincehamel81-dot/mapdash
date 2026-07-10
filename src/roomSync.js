@@ -23,7 +23,11 @@ function rowToRoom(row) {
     maxPlayers: row.max_players,
     players: state.players || [],
     clouds: state.clouds || [],
-    winnerId: state.winnerId ?? null,
+    items: state.items || [],
+    roundStartedAt: state.roundStartedAt ?? null,
+    itName: state.itName ?? null,
+    // Fallback covers any room saved under the old singular-winnerId shape during rollout.
+    winners: state.winners || (state.winnerId ? [state.winnerId] : []),
     createdAt: state.createdAt ?? new Date(row.created_at).getTime()
   }
 }
@@ -38,7 +42,10 @@ function roomToRow(room) {
     state: {
       players: room.players,
       clouds: room.clouds,
-      winnerId: room.winnerId ?? null,
+      items: room.items || [],
+      roundStartedAt: room.roundStartedAt ?? null,
+      itName: room.itName ?? null,
+      winners: room.winners || [],
       createdAt: room.createdAt
     }
   }

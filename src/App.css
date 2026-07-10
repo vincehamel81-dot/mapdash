@@ -209,6 +209,41 @@
   color: #1967d2;
 }
 
+.item-tracker {
+  padding: 16px;
+  background: #ffffff;
+  border-radius: 16px;
+  border: 1px solid #e8eaed;
+  display: grid;
+  gap: 10px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.item-tracker-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: #f8f9fa;
+  border-radius: 12px;
+}
+
+.item-tracker-icon {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+}
+
+.item-tracker-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.item-tracker-found {
+  opacity: 0.45;
+}
+
 .player-status.active {
   background: #e6f4ea;
   color: #188038;
@@ -403,6 +438,22 @@
 .player-dot.eliminated {
   opacity: 0.35;
   filter: grayscale(80%);
+}
+
+.item-marker {
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  transform: translate(-50%, -50%);
+  color: #ffb400;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.35));
+  pointer-events: none;
+  z-index: 650;
+}
+
+.item-marker svg {
+  width: 100%;
+  height: 100%;
 }
 
 .countdown-overlay {

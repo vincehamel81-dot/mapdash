@@ -587,3 +587,15 @@ export function findNearestSegment(segments, point) {
 export function getSegmentPosition(segment, distanceAlong) {
   return getPointAtDistanceAlongPolyline(segment.polyline, Math.min(Math.max(distanceAlong, 0), segment.lengthMeters))
 }
+
+// Picks a uniformly-random point somewhere along the street graph - used to place Finder-Keeper
+// items. No bbox filtering needed: the graph is already built solely from segments.json, which is
+// itself scoped to CONFIG.bbox.
+export function pickRandomStreetPoint(graph) {
+  const edges = Array.from(graph.edges.values()).filter((e) => e.lengthMeters > 0)
+  if (!edges.length) return null
+  const edge = edges[Math.floor(Math.random() * edges.length)]
+  const distanceAlong = Math.random() * edge.lengthMeters
+  const [lat, lng] = getSegmentPosition(edge, distanceAlong)
+  return { lat, lng }
+}

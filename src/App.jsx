@@ -17,7 +17,8 @@ import {
   toCompassBearing,
   resolveEdgeEntry,
   offsetLatLng,
-  haversine
+  haversine,
+  pickRandomStreetPoint
 } from './mapUtils'
 import './App.css'
 
@@ -37,6 +38,53 @@ const CARDINAL_ANGLES = {
 // (Android Auto style) instead of snapping instantly to the new segment's direction.
 const MAX_BEARING_DEG_PER_SEC = 220
 const CLOUD_MOVE_INTERVAL_MS = 7000
+
+// Read once at module load - a `?debugRoundMs=` query param overrides Survival/Tag's round
+// duration so verification doesn't require waiting out a real 5-10 minute round. Inert in normal
+// play (no query param = no effect).
+const DEBUG_ROUND_MS = (() => {
+  if (typeof window === 'undefined') return null
+  const raw = new URLSearchParams(window.location.search).get('debugRoundMs')
+  const parsed = raw ? parseInt(raw, 10) : NaN
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+})()
+
+const MODE_CONFIG = {
+  single: { label: 'Single', roomBased: false, hostGatedStart: false, minPlayers: 1, maxPlayers: 1, roundDurationMs: null },
+  team: { label: 'Team', roomBased: true, hostGatedStart: false, minPlayers: 2, maxPlayers: 4, roundDurationMs: null },
+  survival: { label: 'Survival', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 6, roundDurationMs: DEBUG_ROUND_MS ?? 10 * 60 * 1000 },
+  'finder-easy': { label: 'Finder (Easy)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 6, roundDurationMs: null },
+  'finder-hard': { label: 'Finder (Hard)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 6, roundDurationMs: null },
+  tag: { label: 'Tag', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 6, roundDurationMs: DEBUG_ROUND_MS ?? 5 * 60 * 1000 }
+}
+
+const CLOUD_DAMAGE_PER_SEC = { white: 30, gray: 100, black: 250 }
+const FINDER_ITEM_ICON_IDS = ['cat', 'dog', 'apple', 'banana', 'cherry', 'gift', 'puzzle', 'heart', 'star', 'crown']
+const FINDER_PICKUP_RADIUS_METERS = 15
+const TAG_CONTACT_RADIUS_METERS = 8
+
+function randomCloudTier() {
+  const r = Math.random()
+  return r < 1 / 3 ? 'white' : r < 2 / 3 ? 'gray' : 'black'
+}
+
+// Builds the per-player fields a fresh round needs for the given mode; called at both room
+// creation and every restart so a re-run round always starts from a clean slate.
+function resetPlayersForRound(players, mode) {
+  let itName = null
+  const next = players.map((p) => ({ ...p, eliminated: false }))
+  if (mode === 'survival') {
+    return { players: next.map((p) => ({ ...p, health: 1000 })), itName }
+  }
+  if (mode === 'finder-easy' || mode === 'finder-hard') {
+    return { players: next.map((p) => ({ ...p, foundItems: [] })), itName }
+  }
+  if (mode === 'tag') {
+    itName = next[Math.floor(Math.random() * next.length)]?.name ?? null
+    return { players: next.map((p) => ({ ...p, isIt: p.name === itName })), itName }
+  }
+  return { players: next, itName }
+}
 
 function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
@@ -95,16 +143,17 @@ function cloudsToGeoJSON(clouds) {
     features: clouds.map((cloud) => ({
       type: 'Feature',
       geometry: { type: 'Polygon', coordinates: [cloudPolygonCoords(cloud)] },
-      properties: { id: cloud.id }
+      properties: { id: cloud.id, tier: cloud.tier || null }
     }))
   }
 }
 
 // Most clouds are modest, but occasionally (~15%) spawn a genuinely huge one spanning several
 // street blocks, per the "clouds should feel epic sometimes, not uniformly small" request.
-function randomCloudRadius() {
-  if (Math.random() < 0.15) return 220 + Math.random() * 280
-  return 20 + Math.random() * 70
+// Survival clouds are twice this size per the mode's rules (sizeMultiplier = 2).
+function randomCloudRadius(sizeMultiplier = 1) {
+  const base = Math.random() < 0.15 ? 220 + Math.random() * 280 : 20 + Math.random() * 70
+  return base * sizeMultiplier
 }
 
 const defaultPosition = {
@@ -182,7 +231,7 @@ function useDrivingControls(started, onControlsChange, onZoomChange) {
   }, [started, onControlsChange, onZoomChange])
 }
 
-function ScreenOverlay({ wind, players = [] }) {
+function ScreenOverlay({ wind, players = [], items = [] }) {
   return (
     <div className="screen-overlay">
       <div className="overlay-top-left">
@@ -190,6 +239,14 @@ function ScreenOverlay({ wind, players = [] }) {
       </div>
       {players.map((p) => (
         <div key={p.name} className={`player-dot ${p.eliminated ? 'eliminated' : ''}`} style={{ left: `${p.screenX}%`, top: `${p.screenY}%`, background: p.color }} title={p.name} />
+      ))}
+      {items.map((item) => (
+        <div
+          key={item.id}
+          className="item-marker"
+          style={{ left: `${item.screenX}%`, top: `${item.screenY}%` }}
+          dangerouslySetInnerHTML={{ __html: getAvatarSvg(item.iconId) }}
+        />
       ))}
     </div>
   )
@@ -251,7 +308,7 @@ export default function App({ playerName }) {
       type: 'fill',
       source: 'clouds',
       paint: {
-        'fill-color': '#ffffff',
+        'fill-color': ['match', ['get', 'tier'], 'black', '#3c3f45', 'gray', '#9aa0a6', '#ffffff'],
         'fill-opacity': 0.9,
         'fill-outline-color': 'rgba(90,110,135,0.55)'
       }
@@ -331,6 +388,16 @@ export default function App({ playerName }) {
     [rooms, joinedRoomCode]
   )
 
+  // A player already sitting in a room only ever gets `started` set at the moment they
+  // create/join it. Without this, someone waiting in a host-gated lobby never learns the host
+  // clicked Start (or Stop) - this keeps `started` in sync with the room's actual status for the
+  // whole time they're in it, not just the initial join.
+  useEffect(() => {
+    if (!currentRoom) return
+    const shouldBeStarted = currentRoom.status === 'playing' && !currentRoom.players.find((p) => p.name === name)?.eliminated
+    setStarted((prev) => (prev === shouldBeStarted ? prev : shouldBeStarted))
+  }, [currentRoom, name])
+
   const currentPlayer = useMemo(
     () => currentRoom?.players.find((player) => player.name === name) || null,
     [currentRoom, name]
@@ -341,6 +408,46 @@ export default function App({ playerName }) {
   const roomChannelRef = useRef(null)
   const lastBroadcastRef = useRef(0)
   const [livePositions, setLivePositions] = useState({})
+
+  // Survival health - changes every frame, so (like position) it never touches Postgres per-tick;
+  // it rides the same throttled broadcast and is only persisted once, by the host, at round end.
+  const [health, setHealth] = useState(1000)
+  const healthRef = useRef(1000)
+
+  // A live-round timer readout (survival/tag) needs *something* to re-render on a schedule since
+  // remaining time isn't itself React state - a 1s ticking counter is the cheapest way to do that.
+  // eslint-disable-next-line no-unused-vars
+  const [clockTick, setClockTick] = useState(0)
+  useEffect(() => {
+    if (!currentRoom?.roundStartedAt || currentRoom.status !== 'playing') return
+    const interval = window.setInterval(() => setClockTick((t) => t + 1), 1000)
+    return () => window.clearInterval(interval)
+  }, [currentRoom?.roundStartedAt, currentRoom?.status])
+
+  // Reset local health whenever a new Survival round starts.
+  useEffect(() => {
+    if (currentRoom?.mode === 'survival' && currentRoom.roundStartedAt) {
+      healthRef.current = 1000
+      setHealth(1000)
+    }
+  }, [currentRoom?.mode, currentRoom?.roundStartedAt])
+
+  // One consolidated snapshot the animation tick loop (and the cloud-spawn interval) read from -
+  // both run on their own timers with narrow dependency arrays, so rather than adding half a
+  // dozen individual ref mirrors, everything they need to read (but not react to) lives here and
+  // is refreshed after every render.
+  const liveRef = useRef({})
+  useEffect(() => {
+    liveRef.current = {
+      currentRoom,
+      livePositions,
+      clouds,
+      eliminated,
+      foundItems: currentPlayer?.foundItems || [],
+      updateRoom,
+      name
+    }
+  })
 
   // Live position travels over an ephemeral Realtime Broadcast channel per room, never the
   // database - only room structure (roster/status/clouds) is persisted via useRoomSync.
@@ -370,22 +477,38 @@ export default function App({ playerName }) {
     }
 
     if (currentRoom.status === 'finished') {
-      const winner = currentRoom.players.find((player) => !player.eliminated)
-      if (winner) {
-        setGameMessage(winner.name === name ? 'You survived and won!' : `${winner.name} survived and won!`)
+      const names = currentRoom.winners || []
+      if (!names.length) {
+        setGameMessage('Round finished with no winner.')
       } else {
-        setGameMessage('All players were hit. Survival round ended.')
+        setGameMessage(names.includes(name) ? 'You won!' : `${names.join(' & ')} won!`)
       }
       return
     }
 
     if (currentRoom.mode === 'survival') {
-      if (currentPlayer?.eliminated) {
-        setGameMessage('You were hit by a cloud! Watch for the next round.')
-      } else if (currentRoom.status === 'waiting') {
+      setGameMessage(currentRoom.status === 'waiting' ? 'Waiting for another player to join...' : 'Dodge clouds! Most health after 10 minutes wins.')
+      return
+    }
+
+    if (currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard') {
+      if (currentRoom.status === 'waiting') {
         setGameMessage('Waiting for another player to join...')
       } else {
-        setGameMessage('Dodge clouds! Last player remaining wins.')
+        setGameMessage(currentRoom.mode === 'finder-easy' ? 'Find all 10 items - watch for their icons on the map!' : 'Find all 10 items - only the distance list can help you.')
+      }
+      return
+    }
+
+    if (currentRoom.mode === 'tag') {
+      if (currentRoom.status === 'waiting') {
+        setGameMessage('Waiting for another player to join...')
+      } else if (currentRoom.itName === name) {
+        setGameMessage("You're It! Catch everyone before time runs out.")
+      } else if (currentPlayer?.eliminated) {
+        setGameMessage('Tagged! Watch for the next round.')
+      } else {
+        setGameMessage(`Run from ${currentRoom.itName}!`)
       }
       return
     }
@@ -401,10 +524,12 @@ export default function App({ playerName }) {
 
   const currentSegment = useMemo(() => graph?.edges.get(currentEdgeId) || null, [graph, currentEdgeId])
   const displayedSpeed = useMemo(() => {
-    if (controls.forward) return currentSegment?.speedKmh ?? 50
-    if (controls.reverse) return 25
-    return 0
-  }, [controls, currentSegment])
+    const base = controls.forward ? currentSegment?.speedKmh ?? 50 : controls.reverse ? 25 : 0
+    // Tag's "It" drives 1.5x everyone else's speed - applied uniformly (including the fixed
+    // reverse speed) so there's no exploit in reversing to dodge the buff.
+    const isIt = currentRoom?.mode === 'tag' && currentRoom.itName === name
+    return isIt ? base * 1.5 : base
+  }, [controls, currentSegment, currentRoom, name])
 
   // Throttled to ~8Hz so cross-device position sync stays well within the realtime message
   // budget - this never touches Supabase's database, only the ephemeral broadcast channel.
@@ -417,10 +542,19 @@ export default function App({ playerName }) {
       roomChannelRef.current.send({
         type: 'broadcast',
         event: 'position',
-        payload: { name, lat: pos.lat, lng: pos.lng, heading: headingVal, speed: speedVal, eliminated }
+        payload: {
+          name,
+          lat: pos.lat,
+          lng: pos.lng,
+          heading: headingVal,
+          speed: speedVal,
+          eliminated,
+          health: healthRef.current,
+          foundCount: (currentPlayer?.foundItems || []).length
+        }
       })
     },
-    [joinedRoomCode, name, eliminated]
+    [joinedRoomCode, name, eliminated, currentPlayer]
   )
 
   const zoomIn = () => setZoom((z) => Math.min(CONFIG.maxZoom, z + 1))
@@ -642,6 +776,54 @@ export default function App({ playerName }) {
         // Sync this player's state into the shared room so other tabs see it
         syncPlayerState(posObj, displayedHeading, displayedSpeed)
 
+        // Mode-specific per-frame effects (Survival damage/regen, Finder-Keeper pickups, Tag
+        // contact-elimination). None of currentRoom/clouds/livePositions/eliminated are deps of
+        // this effect, so everything here reads from liveRef instead of a stale closure.
+        const live = liveRef.current
+        const room = live.currentRoom
+        if (room?.status === 'playing') {
+          if (room.mode === 'survival') {
+            const hitClouds = live.clouds.filter(
+              (c) => c.tier && haversine([posObj.lat, posObj.lng], [c.lat, c.lng]) <= c.radiusMeters
+            )
+            if (hitClouds.length) {
+              // Worst tier only - overlapping clouds don't stack damage.
+              const worst = hitClouds.reduce((a, b) => (CLOUD_DAMAGE_PER_SEC[b.tier] > CLOUD_DAMAGE_PER_SEC[a.tier] ? b : a))
+              healthRef.current = Math.max(0, healthRef.current - CLOUD_DAMAGE_PER_SEC[worst.tier] * dt)
+            } else {
+              healthRef.current = Math.min(1000, healthRef.current + (1 / 3) * dt) // "+1 every 3s"
+            }
+            setHealth(healthRef.current)
+          } else if ((room.mode === 'finder-easy' || room.mode === 'finder-hard') && !live.eliminated) {
+            const unfound = (room.items || []).filter((item) => !live.foundItems.includes(item.id))
+            const found = unfound.find(
+              (item) => haversine([posObj.lat, posObj.lng], [item.lat, item.lng]) <= FINDER_PICKUP_RADIUS_METERS
+            )
+            if (found) {
+              const nextFoundItems = [...live.foundItems, found.id]
+              const wonRound = nextFoundItems.length >= FINDER_ITEM_ICON_IDS.length
+              live.updateRoom(room.code, (r) => ({
+                ...r,
+                items: r.items.map((i) => (i.id === found.id ? { ...i, foundBy: live.name } : i)),
+                players: r.players.map((p) => (p.name === live.name ? { ...p, foundItems: nextFoundItems } : p)),
+                // First to 10 wins - guard against clobbering an already-recorded winner in the
+                // rare case two players finish within the same round-trip.
+                ...(wonRound && !r.winners?.length ? { status: 'finished', winners: [live.name] } : {})
+              }))
+            }
+          } else if (room.mode === 'tag' && !live.eliminated && room.itName !== live.name) {
+            const itPos = live.livePositions[room.itName]
+            if (itPos && haversine([posObj.lat, posObj.lng], [itPos.lat, itPos.lng]) <= TAG_CONTACT_RADIUS_METERS) {
+              setEliminated(true)
+              setStarted(false)
+              live.updateRoom(room.code, (r) => ({
+                ...r,
+                players: r.players.map((p) => (p.name === live.name ? { ...p, eliminated: true } : p))
+              }))
+            }
+          }
+        }
+
         // Drive the map imperatively rather than through a React-effect-triggered setView:
         // one call per frame here instead of a full render+effect cycle, and the bearing eases
         // toward the target at a capped angular speed instead of snapping every turn. Skip this
@@ -767,11 +949,31 @@ export default function App({ playerName }) {
   }, [])
 
   useEffect(() => {
+    const isTooCloseToAnyPlayer = (lat, lng) => {
+      const live = liveRef.current
+      const self = positionRef.current
+      if (self && haversine([lat, lng], [self.lat, self.lng]) < 50) return true
+      return Object.values(live.livePositions || {}).some((p) => haversine([lat, lng], [p.lat, p.lng]) < 50)
+    }
+
     const spawnCloudNear = (anchor) => {
-      const bearing = Math.random() * 360
-      const distance = 250 + Math.random() * 650
-      const [lat, lng] = offsetLatLng([anchor.lat, anchor.lng], bearing, distance)
-      return { id: crypto.randomUUID(), lat, lng, radiusMeters: randomCloudRadius() }
+      const isSurvival = liveRef.current.currentRoom?.mode === 'survival'
+      let lat, lng
+      // For survival, retry a few times to avoid spawning right on top of a player; accept the
+      // last candidate even if still close rather than spawning nothing.
+      for (let attempt = 0; attempt < (isSurvival ? 10 : 1); attempt++) {
+        const bearing = Math.random() * 360
+        const distance = 250 + Math.random() * 650
+        ;[lat, lng] = offsetLatLng([anchor.lat, anchor.lng], bearing, distance)
+        if (!isSurvival || !isTooCloseToAnyPlayer(lat, lng)) break
+      }
+      return {
+        id: crypto.randomUUID(),
+        lat,
+        lng,
+        radiusMeters: randomCloudRadius(isSurvival ? 2 : 1),
+        tier: isSurvival ? randomCloudTier() : null
+      }
     }
 
     const driftAndPrune = (list, anchor) => {
@@ -840,7 +1042,7 @@ export default function App({ playerName }) {
 
   
 
-  const getRoomCapacity = (roomMode) => (roomMode === 'survival' ? 2 : 4)
+  const getRoomCapacity = (roomMode) => MODE_CONFIG[roomMode]?.maxPlayers ?? 4
 
   const updateRoom = useCallback(
     (roomCodeToUpdate, roomUpdater) => {
@@ -863,27 +1065,93 @@ export default function App({ playerName }) {
   }, [currentRoom, updateRoom])
 
 
+  // Builds the fresh per-round fields (players reset, items, It, round start timestamp) shared by
+  // both the initial Start and every subsequent restart, keyed off MODE_CONFIG so it generalizes
+  // to whichever mode the room is running instead of special-casing survival.
+  const buildRoundState = useCallback(
+    (players, roomMode) => {
+      const { players: nextPlayers, itName } = resetPlayersForRound(players, roomMode)
+      const isFinder = roomMode === 'finder-easy' || roomMode === 'finder-hard'
+      const items = isFinder && graph
+        ? FINDER_ITEM_ICON_IDS.map((iconId, i) => {
+            const pt = pickRandomStreetPoint(graph) || defaultPosition
+            return { id: `item-${i}-${crypto.randomUUID()}`, iconId, lat: pt.lat, lng: pt.lng, foundBy: null }
+          })
+        : []
+      return { players: nextPlayers, itName, items, roundStartedAt: Date.now() }
+    },
+    [graph]
+  )
+
   const restartImmediate = useCallback(() => {
     if (!currentRoom) return
+    const cfg = MODE_CONFIG[currentRoom.mode]
+    const enoughPlayers = currentRoom.players.length >= cfg.minPlayers
+    const roundExtras = enoughPlayers ? buildRoundState(currentRoom.players, currentRoom.mode) : null
     const nextRoom = {
       ...currentRoom,
-      status: currentRoom.mode === 'survival'
-        ? currentRoom.players.length > 1
-          ? 'playing'
-          : 'waiting'
-        : 'playing',
-      players: currentRoom.players.map((player) => ({ ...player, eliminated: false })),
-      winnerId: null
+      status: enoughPlayers ? 'playing' : 'waiting',
+      players: roundExtras ? roundExtras.players : currentRoom.players.map((player) => ({ ...player, eliminated: false })),
+      itName: roundExtras ? roundExtras.itName : null,
+      items: roundExtras ? roundExtras.items : [],
+      roundStartedAt: roundExtras ? roundExtras.roundStartedAt : null,
+      winners: []
     }
     updateRoom(currentRoom.code, () => nextRoom)
     setEliminated(false)
     setStarted(nextRoom.status === 'playing')
-  }, [currentRoom, updateRoom])
+  }, [currentRoom, updateRoom, buildRoundState])
 
-  // Auto-restart survival rounds when finished (host only)
+  // Survival round resolution (host-only): once the 10-minute mark passes, tally each player's
+  // last-known health (self from healthRef, others from their last broadcast) and resolve the
+  // winner(s) by max health - ties are explicitly allowed ("double winners").
+  useEffect(() => {
+    if (!isRoomHost || currentRoom?.mode !== 'survival' || currentRoom.status !== 'playing' || !currentRoom.roundStartedAt) return
+    const durationMs = MODE_CONFIG.survival.roundDurationMs
+    const interval = window.setInterval(() => {
+      if (Date.now() - currentRoom.roundStartedAt < durationMs) return
+      const live = liveRef.current
+      const finalHealth = {}
+      for (const p of currentRoom.players) {
+        finalHealth[p.name] = p.name === name ? healthRef.current : live.livePositions[p.name]?.health ?? p.health ?? 0
+      }
+      const maxHealth = Math.max(...Object.values(finalHealth))
+      updateRoom(currentRoom.code, (room) => ({
+        ...room,
+        status: 'finished',
+        winners: room.players.filter((p) => finalHealth[p.name] === maxHealth).map((p) => p.name),
+        players: room.players.map((p) => ({ ...p, health: finalHealth[p.name] }))
+      }))
+    }, 1000)
+    return () => window.clearInterval(interval)
+  }, [isRoomHost, currentRoom, name, updateRoom])
+
+  // Tag round resolution (host-only): either It eliminates every other player ("It won") or the
+  // 5-minute mark passes first ("It lost", every still-alive non-It player wins).
+  useEffect(() => {
+    if (!isRoomHost || currentRoom?.mode !== 'tag' || currentRoom.status !== 'playing' || !currentRoom.roundStartedAt) return
+    const others = currentRoom.players.filter((p) => p.name !== currentRoom.itName)
+    if (others.length && others.every((p) => p.eliminated)) {
+      updateRoom(currentRoom.code, (room) => (room.status === 'finished' ? room : { ...room, status: 'finished', winners: [room.itName] }))
+      return
+    }
+    const durationMs = MODE_CONFIG.tag.roundDurationMs
+    const interval = window.setInterval(() => {
+      if (Date.now() - currentRoom.roundStartedAt < durationMs) return
+      updateRoom(currentRoom.code, (room) => {
+        if (room.status === 'finished') return room
+        const survivors = room.players.filter((p) => p.name !== room.itName && !p.eliminated)
+        return { ...room, status: 'finished', winners: survivors.map((p) => p.name) }
+      })
+    }, 1000)
+    return () => window.clearInterval(interval)
+  }, [isRoomHost, currentRoom, updateRoom])
+
+  // Auto-restart host-gated rounds when finished (host only) - generalizes what used to be
+  // survival-only to every mode where the host controls when a round begins.
   useEffect(() => {
     if (!currentRoom || !isRoomHost) return
-    if (currentRoom.status === 'finished' && currentRoom.mode === 'survival') {
+    if (currentRoom.status === 'finished' && MODE_CONFIG[currentRoom.mode]?.hostGatedStart) {
       startCountdown(3, () => {
         restartImmediate()
       })
@@ -899,15 +1167,22 @@ export default function App({ playerName }) {
 
   const startRoom = useCallback(() => {
     if (!currentRoom || !isRoomHost) return
+    const cfg = MODE_CONFIG[currentRoom.mode]
+    const enoughPlayers = currentRoom.players.length >= cfg.minPlayers
+    const roundExtras = enoughPlayers ? buildRoundState(currentRoom.players, currentRoom.mode) : null
     const nextRoom = {
       ...currentRoom,
-      status: currentRoom.mode === 'survival' ? (currentRoom.players.length > 1 ? 'playing' : 'waiting') : 'playing',
-      players: currentRoom.players.map((p) => ({ ...p, eliminated: false }))
+      status: enoughPlayers ? 'playing' : 'waiting',
+      players: roundExtras ? roundExtras.players : currentRoom.players,
+      itName: roundExtras ? roundExtras.itName : null,
+      items: roundExtras ? roundExtras.items : [],
+      roundStartedAt: roundExtras ? roundExtras.roundStartedAt : null,
+      winners: []
     }
     updateRoom(currentRoom.code, () => nextRoom)
     setEliminated(false)
     setStarted(nextRoom.status === 'playing')
-  }, [currentRoom, isRoomHost, updateRoom])
+  }, [currentRoom, isRoomHost, updateRoom, buildRoundState])
 
   const stopRoom = useCallback(() => {
     if (!currentRoom || !isRoomHost) return
@@ -919,7 +1194,7 @@ export default function App({ playerName }) {
     }
     const nextRoom = {
       ...currentRoom,
-      status: currentRoom.mode === 'survival' ? 'finished' : 'waiting'
+      status: MODE_CONFIG[currentRoom.mode]?.hostGatedStart ? 'finished' : 'waiting'
     }
     updateRoom(currentRoom.code, () => nextRoom)
     setStarted(false)
@@ -933,23 +1208,20 @@ export default function App({ playerName }) {
         if (room.code !== joinedRoomCode) return room
         const remainingPlayers = room.players.filter((player) => player.name !== name)
         if (!remainingPlayers.length) return null
+        const cfg = MODE_CONFIG[room.mode]
         const nextRoom = {
           ...room,
           players: remainingPlayers,
-          status:
-            room.mode === 'survival'
-              ? remainingPlayers.length >= 2
-                ? 'playing'
-                : 'finished'
-              : remainingPlayers.length >= 2
+          status: !cfg?.hostGatedStart
+            ? remainingPlayers.length >= cfg?.minPlayers
               ? 'playing'
               : 'waiting'
+            : remainingPlayers.length >= cfg.minPlayers
+            ? room.status
+            : 'finished'
         }
         if (room.host === name) {
           nextRoom.host = remainingPlayers[0].name
-        }
-        if (room.mode === 'survival' && nextRoom.status === 'finished' && remainingPlayers.length === 1) {
-          nextRoom.players = remainingPlayers.map((player) => ({ ...player, eliminated: player.eliminated || false }))
         }
         return nextRoom
       })
@@ -973,18 +1245,21 @@ export default function App({ playerName }) {
       code,
       mode,
       host: sanitizedName,
-      status: mode === 'survival' ? 'waiting' : 'playing',
+      status: MODE_CONFIG[mode]?.hostGatedStart ? 'waiting' : 'playing',
       createdAt: Date.now(),
       players: [{ name: sanitizedName, color: selectedColor, eliminated: false }],
       clouds: [],
-      winnerId: null,
+      items: [],
+      itName: null,
+      roundStartedAt: null,
+      winners: [],
       maxPlayers: getRoomCapacity(mode)
     }
 
     setRooms([...rooms, newRoom])
     setJoinedRoomCode(code)
     setRoomCode(code)
-    setStarted(mode === 'team')
+    setStarted(!MODE_CONFIG[mode]?.hostGatedStart)
   }, [mode, name, roomCode, selectedColor, rooms, setRooms])
 
   const joinRoom = useCallback(
@@ -1020,14 +1295,17 @@ export default function App({ playerName }) {
       const nextRoom = {
         ...room,
         players: [...room.players, newPlayer],
-        status: room.mode === 'survival' ? 'playing' : 'playing'
+        // Host-gated modes (survival/finder/tag) stay whatever they already were - only the host's
+        // Start click should flip 'waiting' to 'playing'. Team has no host gate, so joining always
+        // drops straight into the drive.
+        status: MODE_CONFIG[room.mode]?.hostGatedStart ? room.status : 'playing'
       }
 
       const nextRooms = rooms.map((item) => (item.code === code ? nextRoom : item))
       setRooms(nextRooms)
       setJoinedRoomCode(code)
       setMode(room.mode)
-      setStarted(true)
+      setStarted(nextRoom.status === 'playing')
     },
     [roomCode, rooms, selectedColor, name, currentPlayer, setRooms]
   )
@@ -1075,50 +1353,62 @@ export default function App({ playerName }) {
     }
   }, [currentRoom, name, livePositions])
 
-  const checkCloudCollision = useCallback(() => {
-    if (eliminated || !currentRoom || currentRoom.mode !== 'survival' || currentRoom.status !== 'playing') return false
-    return clouds.some((cloud) => haversine([position.lat, position.lng], [cloud.lat, cloud.lng]) <= cloud.radiusMeters)
-  }, [clouds, currentRoom, eliminated, position])
+  // Survival's old "touch a cloud = instant out" collision check lived here; it's replaced by the
+  // continuous health damage/regen loop in the movement tick effect below, which also drives the
+  // 10-minute win-by-health resolution instead of a last-survivor check.
 
-  const handleElimination = useCallback(() => {
-    if (eliminated || !currentRoom) return
-
-    setEliminated(true)
-    setStarted(false)
-
-    const updatedRoom = {
-      ...currentRoom,
-      players: currentRoom.players.map((player) =>
-        player.name === name ? { ...player, eliminated: true } : player
-      )
+  // Finder (Easy) only - item markers on the map, same project-to-% recipe as screenPlayers above.
+  // Hard mode simply never computes this, which is the entire easy/hard visibility difference.
+  const screenItems = useMemo(() => {
+    if (currentRoom?.mode !== 'finder-easy' || !mapRef.current) return []
+    try {
+      const map = mapRef.current
+      const container = map.getContainer()
+      const width = container.clientWidth
+      const height = container.clientHeight
+      const foundIds = currentPlayer?.foundItems || []
+      return (currentRoom.items || [])
+        .filter((item) => !foundIds.includes(item.id))
+        .map((item) => {
+          const point = map.project([item.lng, item.lat])
+          return { id: item.id, iconId: item.iconId, screenX: (point.x / width) * 100, screenY: (point.y / height) * 100 }
+        })
+    } catch {
+      return []
     }
+  }, [currentRoom, currentPlayer])
 
-    const survivors = updatedRoom.players.filter((player) => !player.eliminated)
-    if (survivors.length === 1) {
-      updatedRoom.status = 'finished'
-      updatedRoom.winnerId = survivors[0].name
-    } else if (survivors.length === 0) {
-      updatedRoom.status = 'finished'
-      updatedRoom.winnerId = null
-    }
+  const itemDistances = useMemo(() => {
+    if (!currentRoom || !(currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard')) return []
+    const foundIds = currentPlayer?.foundItems || []
+    return (currentRoom.items || [])
+      .map((item) => ({
+        ...item,
+        found: foundIds.includes(item.id),
+        distanceMeters: haversine([position.lat, position.lng], [item.lat, item.lng])
+      }))
+      .sort((a, b) => (a.found === b.found ? a.distanceMeters - b.distanceMeters : a.found ? 1 : -1))
+  }, [currentRoom, currentPlayer, position])
 
-    updateRoom(updatedRoom.code, () => updatedRoom)
-  }, [currentRoom, eliminated, name, updateRoom])
-
-  useEffect(() => {
-    if (!started || eliminated || !currentRoom) return
-    if (checkCloudCollision()) {
-      handleElimination()
-    }
-  }, [checkCloudCollision, currentRoom, eliminated, handleElimination, started])
+  const roundRemainingLabel = useMemo(() => {
+    const durationMs = currentRoom ? MODE_CONFIG[currentRoom.mode]?.roundDurationMs : null
+    if (!durationMs || !currentRoom?.roundStartedAt || currentRoom.status !== 'playing') return null
+    const remainingMs = Math.max(0, durationMs - (Date.now() - currentRoom.roundStartedAt))
+    const totalSeconds = Math.ceil(remainingMs / 1000)
+    const mm = Math.floor(totalSeconds / 60)
+    const ss = String(totalSeconds % 60).padStart(2, '0')
+    return `${mm}:${ss}`
+    // clockTick has no value of its own - it exists purely to re-trigger this memo every second.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentRoom?.roundStartedAt, currentRoom?.status, currentRoom?.mode, clockTick])
 
   return (
     <div className="app-shell">
       <div className="app-sidebar">
         <div className="mode-select">
-          <button className={mode === 'single' ? 'active' : ''} onClick={() => { setMode('single'); setStarted(false) }}>Single</button>
-          <button className={mode === 'team' ? 'active' : ''} onClick={() => { setMode('team'); setStarted(false) }}>Team</button>
-          <button className={mode === 'survival' ? 'active' : ''} onClick={() => { setMode('survival'); setStarted(false) }}>Survival</button>
+          {Object.entries(MODE_CONFIG).map(([key, cfg]) => (
+            <button key={key} className={mode === key ? 'active' : ''} onClick={() => { setMode(key); setStarted(false) }}>{cfg.label}</button>
+          ))}
         </div>
         {!started ? (
           <div className="lobby-panel">
@@ -1154,7 +1444,7 @@ export default function App({ playerName }) {
                 <button onClick={() => { setPickedSpawn(null); setPickingSpawn(false) }}>Reset to default</button>
               ) : null}
             </div>
-            {mode === 'team' || mode === 'survival' ? (
+            {MODE_CONFIG[mode]?.roomBased ? (
               <>
                 <label>Room code</label>
                 <input value={roomCode} onChange={(e) => setRoomCode(e.target.value.toUpperCase())} placeholder="ROOM123" />
@@ -1174,15 +1464,14 @@ export default function App({ playerName }) {
             ) : null}
             {currentRoom && currentRoom.status === 'finished' ? (
               <div className="room-finished">
-                <div>{currentRoom.winnerId ? `${currentRoom.winnerId} won` : 'Round finished'}</div>
+                <div>{currentRoom.winners?.length ? `${currentRoom.winners.join(' & ')} won` : 'Round finished'}</div>
                 {isRoomHost ? (
                   <button className="cloud-button" onClick={restartRoom}>Restart round</button>
                 ) : null}
                 <button className="leave-room" onClick={closeRoom}>Leave room</button>
               </div>
             ) : null}
-            {mode !== 'team' && mode !== 'survival' && started && null}
-            {(mode === 'team' || mode === 'survival') && !joinedRoomCode ? (
+            {MODE_CONFIG[mode]?.roomBased && !joinedRoomCode ? (
               <div className="room-list">
                 <div className="room-list-title">Available rooms</div>
                 {rooms.filter((room) => room.mode === mode && room.status !== 'closed').length ? (
@@ -1208,6 +1497,7 @@ export default function App({ playerName }) {
             <div>Room <strong>{currentRoom.code}</strong></div>
             <div>Status: <strong>{currentRoom.status}</strong></div>
             <div>Host: <strong>{currentRoom.host || 'Host'}</strong></div>
+            {roundRemainingLabel ? <div>Time left: <strong>{roundRemainingLabel}</strong></div> : null}
             {isRoomHost ? (
               <div className="host-controls">
                 {currentRoom.status !== 'playing' ? (
@@ -1223,10 +1513,36 @@ export default function App({ playerName }) {
         {currentRoom ? (
           <div className="room-player-list">
             <div className="room-player-title">Players</div>
-            {currentRoom.players.map((player) => (
-              <div key={player.name} className="room-player-item">
-                <span style={{ color: player.color }}>{player.name}</span>
-                {player.eliminated ? <span className="player-status">Eliminated</span> : <span className="player-status active">Alive</span>}
+            {currentRoom.players.map((player) => {
+              const isSelf = player.name === name
+              const live = livePositions[player.name]
+              return (
+                <div key={player.name} className="room-player-item">
+                  <span style={{ color: player.color }}>
+                    {player.name}
+                    {currentRoom.itName === player.name ? ' (It)' : ''}
+                  </span>
+                  {currentRoom.mode === 'survival' ? (
+                    <span className="player-status active">{Math.round(isSelf ? health : live?.health ?? player.health ?? 1000)} HP</span>
+                  ) : currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard' ? (
+                    <span className="player-status active">{isSelf ? (player.foundItems || []).length : live?.foundCount ?? 0}/{FINDER_ITEM_ICON_IDS.length}</span>
+                  ) : player.eliminated ? (
+                    <span className="player-status">Eliminated</span>
+                  ) : (
+                    <span className="player-status active">Alive</span>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        ) : null}
+        {currentRoom && (currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard') ? (
+          <div className="item-tracker">
+            <div className="room-player-title">Items ({(currentPlayer?.foundItems || []).length}/{FINDER_ITEM_ICON_IDS.length})</div>
+            {itemDistances.map((item) => (
+              <div key={item.id} className={`item-tracker-item${item.found ? ' item-tracker-found' : ''}`}>
+                <span className="item-tracker-icon" style={{ color: selectedColor }} dangerouslySetInnerHTML={{ __html: getAvatarSvg(item.iconId) }} />
+                <span>{item.found ? 'Found!' : `${Math.round(item.distanceMeters)} m`}</span>
               </div>
             ))}
           </div>
@@ -1293,7 +1609,7 @@ export default function App({ playerName }) {
         {countdown > 0 ? (
           <div className="countdown-overlay">{countdown}</div>
         ) : null}
-        <ScreenOverlay wind={wind} players={screenPlayers} />
+        <ScreenOverlay wind={wind} players={screenPlayers} items={screenItems} />
       </div>
     </div>
   )
