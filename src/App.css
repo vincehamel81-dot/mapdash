@@ -66,12 +66,48 @@
   width: 100%;
   aspect-ratio: 1;
   border-radius: 999px;
-  border: 2px solid transparent;
+  /* A white swatch needs a visible border even when unselected, or it disappears against the
+     sidebar's own white background. */
+  border: 2px solid #b0b5bb;
   cursor: pointer;
 }
 
 .color-picks button.selected {
   border-color: #202124;
+}
+
+.avatar-picks {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 6px;
+  max-height: 168px;
+  overflow-y: auto;
+  padding: 4px;
+  background: #f8f9fa;
+  border-radius: 12px;
+}
+
+.avatar-picks button {
+  width: 100%;
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.avatar-picks button svg {
+  width: 100%;
+  height: 100%;
+}
+
+.avatar-picks button.selected {
+  border-color: #1a73e8;
+  background: #e8f0fe;
 }
 
 .lobby-panel button,
@@ -278,6 +314,16 @@
   width: 26px;
   height: 26px;
   filter: drop-shadow(0 3px 6px rgba(0,0,0,0.35));
+}
+
+.car-marker-glyph {
+  width: 100%;
+  height: 100%;
+}
+
+.car-marker-glyph svg {
+  width: 100%;
+  height: 100%;
 }
 
 .car-marker-label {

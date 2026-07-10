@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import maplibregl from 'maplibre-gl'
 import MapView from './MapView'
 import { CONFIG, THEMES } from './config'
+import { AVATAR_ICONS, DEFAULT_AVATAR_ID, getAvatarSvg } from './avatarIcons'
+import { supabase, isSupabaseConfigured } from './supabaseClient'
 import {
   buildGraph,
   chooseNextSegment,
@@ -18,7 +20,7 @@ import {
 } from './mapUtils'
 import './App.css'
 
-const CAR_COLORS = ['#4285F4', '#DB4437', '#F4B400', '#0F9D58', '#9C27B0', '#FF6D00']
+const CAR_COLORS = ['#4285F4', '#DB4437', '#F4B400', '#0F9D58', '#9C27B0', '#FF6D00', '#202124', '#FFFFFF']
 const CARDINAL_ANGLES = {
   N: 0,
   NE: 45,
@@ -39,11 +41,11 @@ function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 }
 
-function carMarkerMarkup(color, label) {
+function carMarkerMarkup(avatarId, color, label) {
   const safeLabel = escapeHtml(label || '')
-  return `${safeLabel ? `<div class="car-marker-label">${safeLabel}</div>` : ''}<svg width="26" height="26" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-    <path d="M12 2.5L19.5 21L12 17L4.5 21L12 2.5Z" fill="${color}" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>
-  </svg>`
+  // Every avatar (the default arrow included) recolors via currentColor, so this wrapper is the
+  // only place that needs to know the chosen color - the SVG markup itself is never rewritten.
+  return `${safeLabel ? `<div class="car-marker-label">${safeLabel}</div>` : ''}<div class="car-marker-glyph" style="color:${color}">${getAvatarSvg(avatarId)}</div>`
 }
 
 function polylineToGeoJSON(polyline) {
@@ -294,6 +296,8 @@ export default function App({ playerName }) {
   const [roomCode, setRoomCode] = useState('')
   const name = playerName || 'Player'
   const [selectedColor, setSelectedColor] = useState(CAR_COLORS[0])
+  const [selectedAvatarId, setSelectedAvatarId] = useState(DEFAULT_AVATAR_ID)
+  const [appearanceLoaded, setAppearanceLoaded] = useState(!isSupabaseConfigured)
   const [cloudCooldown, setCloudCooldown] = useState(false)
   const [rooms, setRooms] = useRoomSync()
   const [joinedRoomCode, setJoinedRoomCode] = useState(null)
@@ -365,6 +369,40 @@ export default function App({ playerName }) {
   useEffect(() => {
     positionRef.current = position
   }, [position])
+
+  // Load any previously-saved color/avatar for this name, once per name claim. Guarded by
+  // appearanceLoaded so the save effect below doesn't fire (and overwrite the saved row with
+  // defaults) before this finishes.
+  useEffect(() => {
+    if (!isSupabaseConfigured) {
+      setAppearanceLoaded(true)
+      return
+    }
+    let cancelled = false
+    setAppearanceLoaded(false)
+    supabase
+      .from('online_players')
+      .select('color, avatar_id')
+      .eq('name_lower', name.toLowerCase())
+      .maybeSingle()
+      .then(({ data }) => {
+        if (cancelled) return
+        if (data?.color) setSelectedColor(data.color)
+        if (data?.avatar_id) setSelectedAvatarId(data.avatar_id)
+        setAppearanceLoaded(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [name])
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !appearanceLoaded) return
+    supabase
+      .from('online_players')
+      .update({ color: selectedColor, avatar_id: selectedAvatarId })
+      .eq('name_lower', name.toLowerCase())
+  }, [selectedColor, selectedAvatarId, appearanceLoaded, name])
 
   const currentRoom = useMemo(
     () => rooms.find((room) => room.code === joinedRoomCode) || null,
@@ -717,19 +755,19 @@ export default function App({ playerName }) {
     if (!map || !mapReady || carMarkerRef.current) return
     const el = document.createElement('div')
     el.className = 'car-marker-icon'
-    el.innerHTML = carMarkerMarkup(selectedColor, name)
+    el.innerHTML = carMarkerMarkup(selectedAvatarId, selectedColor, name)
     carMarkerElRef.current = el
     carMarkerRef.current = new maplibregl.Marker({ element: el, rotationAlignment: 'viewport', pitchAlignment: 'viewport' })
       .setLngLat([position.lng, position.lat])
       .addTo(map)
-    // position/color are intentionally not deps - creation only happens once map is ready.
+    // position/color/avatar are intentionally not deps - creation only happens once map is ready.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapReady])
 
   useEffect(() => {
     if (!carMarkerElRef.current) return
-    carMarkerElRef.current.innerHTML = carMarkerMarkup(selectedColor, name)
-  }, [selectedColor, name])
+    carMarkerElRef.current.innerHTML = carMarkerMarkup(selectedAvatarId, selectedColor, name)
+  }, [selectedAvatarId, selectedColor, name])
 
   // A temporary marker preview while choosing a custom start point before driving begins.
   useEffect(() => {
@@ -1139,6 +1177,19 @@ export default function App({ playerName }) {
             <div className="color-picks">
               {CAR_COLORS.map((color) => (
                 <button key={color} style={{ backgroundColor: color }} className={selectedColor === color ? 'selected' : ''} onClick={() => setSelectedColor(color)} />
+              ))}
+            </div>
+            <label>Avatar</label>
+            <div className="avatar-picks">
+              {AVATAR_ICONS.map((avatar) => (
+                <button
+                  key={avatar.id}
+                  className={selectedAvatarId === avatar.id ? 'selected' : ''}
+                  title={avatar.label}
+                  style={{ color: selectedColor }}
+                  onClick={() => setSelectedAvatarId(avatar.id)}
+                  dangerouslySetInnerHTML={{ __html: avatar.svg }}
+                />
               ))}
             </div>
             <label>Start point</label>
