@@ -432,6 +432,13 @@
   font-size: 0.9rem;
 }
 
+.mode-pill.turbo-active {
+  background: #ffb400;
+  border-color: #d99400;
+  color: #3a2a00;
+  font-weight: 700;
+}
+
 .center-toggle { display:flex; align-items:center; gap:8px; font-size:0.9rem }
 .center-toggle input { transform: scale(1.1) }
 

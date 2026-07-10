@@ -166,7 +166,7 @@ function useDrivingControls(started, onControlsChange, onZoomChange) {
   useEffect(() => {
     if (!started) return
 
-    const pressed = { forward: false, reverse: false, left: false, right: false }
+    const pressed = { forward: false, reverse: false, left: false, right: false, turbo: false }
     const update = () => onControlsChange({ ...pressed })
 
     const down = (e) => {
@@ -198,6 +198,12 @@ function useDrivingControls(started, onControlsChange, onZoomChange) {
           update()
         }
       }
+      if (key === 'Shift') {
+        if (!pressed.turbo) {
+          pressed.turbo = true
+          update()
+        }
+      }
       if (key === 'b') onZoomChange(-1)
       if (key === 'v') onZoomChange(1)
     }
@@ -220,6 +226,10 @@ function useDrivingControls(started, onControlsChange, onZoomChange) {
         pressed.right = false
         update()
       }
+      if (key === 'Shift') {
+        pressed.turbo = false
+        update()
+      }
     }
 
     window.addEventListener('keydown', down)
@@ -231,7 +241,7 @@ function useDrivingControls(started, onControlsChange, onZoomChange) {
   }, [started, onControlsChange, onZoomChange])
 }
 
-function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh }) {
+function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh, turboActive }) {
   return (
     <div className="screen-overlay">
       <div className="overlay-top-left">
@@ -240,7 +250,7 @@ function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh
       </div>
       {started ? (
         <div className="overlay-bottom-left">
-          <div className="mode-pill">{speedKmh} km/h</div>
+          <div className={`mode-pill${turboActive ? ' turbo-active' : ''}`}>{speedKmh} km/h{turboActive ? ' ⚡ Turbo' : ''}</div>
         </div>
       ) : null}
       {players.map((p) => (
@@ -269,7 +279,7 @@ export default function App({ playerName }) {
   const [activeStreet, setActiveStreet] = useState('Rue inconnue')
   const [activeArrondissement, setActiveArrondissement] = useState('')
   const [activeQuartier, setActiveQuartier] = useState('')
-  const [controls, setControls] = useState({ forward: false, reverse: false, left: false, right: false })
+  const [controls, setControls] = useState({ forward: false, reverse: false, left: false, right: false, turbo: false })
   const [turnPreference, setTurnPreference] = useState('straight')
   const [clouds, setClouds] = useState([])
   const [wind, setWind] = useState({ direction: 'NE', speed: 20, angle: CARDINAL_ANGLES.NE })
@@ -527,8 +537,14 @@ export default function App({ playerName }) {
     // Tag's "It" drives 1.5x everyone else's speed - applied uniformly (including the fixed
     // reverse speed) so there's no exploit in reversing to dodge the buff.
     const isIt = currentRoom?.mode === 'tag' && currentRoom.itName === name
-    return isIt ? base * 1.5 : base
+    if (isIt) return base * 1.5
+    // Turbo (hold Shift): unlimited use, doubles speed in every mode except Tag - It's 1.5x above
+    // is the only speed buff Tag allows, so turbo simply doesn't apply there.
+    const turboActive = controls.turbo && currentRoom?.mode !== 'tag'
+    return turboActive ? base * 2 : base
   }, [controls, currentSegment, currentRoom, name])
+
+  const turboActive = controls.turbo && (controls.forward || controls.reverse) && currentRoom?.mode !== 'tag'
 
   // Throttled to ~8Hz so cross-device position sync stays well within the realtime message
   // budget - this never touches Supabase's database, only the ephemeral broadcast channel.
@@ -1577,7 +1593,7 @@ export default function App({ playerName }) {
         {countdown > 0 ? (
           <div className="countdown-overlay">{countdown}</div>
         ) : null}
-        <ScreenOverlay wind={wind} players={screenPlayers} items={screenItems} started={started} name={name} speedKmh={displayedSpeed} />
+        <ScreenOverlay wind={wind} players={screenPlayers} items={screenItems} started={started} name={name} speedKmh={displayedSpeed} turboActive={turboActive} />
       </div>
     </div>
   )
