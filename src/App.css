@@ -56,6 +56,26 @@
   border: 1px solid #dfe1e5;
 }
 
+.lobby-panel button,
+.cloud-button {
+  background: #1a73e8;
+  color: #ffffff;
+  border: none;
+  border-radius: 14px;
+  padding: 14px 18px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.lobby-panel button:disabled,
+.cloud-button:disabled {
+  background: #c2d4fc;
+  cursor: not-allowed;
+}
+
+/* These two pickers live inside .lobby-panel and need their own button styling (swatch/icon
+   look, not the generic blue action-button look above) - declared after ".lobby-panel button"
+   so they win the cascade on equal specificity instead of being silently overridden by it. */
 .color-picks {
   display: grid;
   grid-template-columns: repeat(6, 1fr);
@@ -108,23 +128,6 @@
 .avatar-picks button.selected {
   border-color: #1a73e8;
   background: #e8f0fe;
-}
-
-.lobby-panel button,
-.cloud-button {
-  background: #1a73e8;
-  color: #ffffff;
-  border: none;
-  border-radius: 14px;
-  padding: 14px 18px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.lobby-panel button:disabled,
-.cloud-button:disabled {
-  background: #c2d4fc;
-  cursor: not-allowed;
 }
 
 .status-panel {
