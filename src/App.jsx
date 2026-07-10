@@ -231,12 +231,18 @@ function useDrivingControls(started, onControlsChange, onZoomChange) {
   }, [started, onControlsChange, onZoomChange])
 }
 
-function ScreenOverlay({ wind, players = [], items = [] }) {
+function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh }) {
   return (
     <div className="screen-overlay">
       <div className="overlay-top-left">
+        {started ? <div className="mode-pill">{name}</div> : null}
         <div className="mode-pill">Wind: {wind.direction} · {wind.speed} km/h</div>
       </div>
+      {started ? (
+        <div className="overlay-bottom-left">
+          <div className="mode-pill">{speedKmh} km/h</div>
+        </div>
+      ) : null}
       {players.map((p) => (
         <div key={p.name} className={`player-dot ${p.eliminated ? 'eliminated' : ''}`} style={{ left: `${p.screenX}%`, top: `${p.screenY}%`, background: p.color }} title={p.name} />
       ))}
@@ -257,7 +263,6 @@ export default function App({ playerName }) {
   const [started, setStarted] = useState(false)
   const [zoom, setZoom] = useState(CONFIG.defaultZoom)
   const [position, setPosition] = useState(defaultPosition)
-  const [heading, setHeading] = useState(0)
   const [segments, setSegments] = useState([])
   const [graph, setGraph] = useState(null)
   const [currentEdgeId, setCurrentEdgeId] = useState(null)
@@ -267,7 +272,6 @@ export default function App({ playerName }) {
   const [controls, setControls] = useState({ forward: false, reverse: false, left: false, right: false })
   const [turnPreference, setTurnPreference] = useState('straight')
   const [clouds, setClouds] = useState([])
-  const [centerCar, setCenterCar] = useState(true)
   const [wind, setWind] = useState({ direction: 'NE', speed: 20, angle: CARDINAL_ANGLES.NE })
   const [roomCode, setRoomCode] = useState('')
   const name = playerName || 'Player'
@@ -286,7 +290,6 @@ export default function App({ playerName }) {
   const [pickedSpawn, setPickedSpawn] = useState(null)
   const [pickingSpawn, setPickingSpawn] = useState(false)
   const mapBearingRef = useRef(0)
-  const centerCarRef = useRef(true)
   const startedRef = useRef(false)
   const positionRef = useRef(defaultPosition)
   const carMarkerRef = useRef(null)
@@ -332,10 +335,6 @@ export default function App({ playerName }) {
       }
     }
   }, [])
-
-  useEffect(() => {
-    centerCarRef.current = centerCar
-  }, [centerCar])
 
   useEffect(() => {
     startedRef.current = started
@@ -652,9 +651,8 @@ export default function App({ playerName }) {
     // The segment's stored polyline direction is arbitrary (unrelated to any "natural" facing),
     // so using it for the pre-drive preview bearing means every pick lands at a essentially
     // random rotation - readable maybe a quarter of the time, and disorienting the rest. Default
-    // to north-up instead; the instant the player actually starts driving, heading is recomputed
-    // correctly from real movement (verified separately) and the map eases to match it.
-    setHeading(0)
+    // to north-up instead; the instant the player actually starts driving, the map's bearing is
+    // recomputed correctly from real movement (verified separately) and eases to match it.
     setActiveStreet(nearest.segment.name || 'Rue inconnue')
     setActiveArrondissement(nearest.segment.arrondissement || '')
     setActiveQuartier(nearest.segment.quartier || '')
@@ -765,11 +763,6 @@ export default function App({ playerName }) {
         // panel's "Heading" readout, and other players' future directional markers all expect.
         // The turn-choice math above intentionally stays in math-angle convention throughout.
         const displayedHeading = toCompassBearing(facingMathAngle)
-        // Before driving starts this recomputes every frame from the spawn segment's arbitrary
-        // polyline direction even though nothing is moving, which would immediately overwrite
-        // the spawn effect's deliberate north-up default within a frame. Only take over once
-        // driving has actually begun.
-        if (startedRef.current) setHeading(displayedHeading)
         setActiveStreet(nextSegment.name || 'Rue inconnue')
         setActiveArrondissement(nextSegment.arrondissement || '')
         setActiveQuartier(nextSegment.quartier || '')
@@ -836,11 +829,8 @@ export default function App({ playerName }) {
           const maxStep = MAX_BEARING_DEG_PER_SEC * dt
           const step = Math.max(-maxStep, Math.min(maxStep, rawDelta))
           mapBearingRef.current = normalizeAngle(currentBearing + step)
-          if (centerCarRef.current) {
-            map.jumpTo({ center: [posObj.lng, posObj.lat], bearing: mapBearingRef.current })
-          } else {
-            map.setBearing(mapBearingRef.current)
-          }
+          // Center car is no longer optional - it's the only supported behavior now.
+          map.jumpTo({ center: [posObj.lng, posObj.lat], bearing: mapBearingRef.current })
           carMarkerRef.current?.setLngLat([posObj.lng, posObj.lat])
           const routeSource = map.getSource?.('route')
           if (routeSource) routeSource.setData(polylineToGeoJSON(nextSegment.polyline))
@@ -1405,11 +1395,13 @@ export default function App({ playerName }) {
   return (
     <div className="app-shell">
       <div className="app-sidebar">
-        <div className="mode-select">
-          {Object.entries(MODE_CONFIG).map(([key, cfg]) => (
-            <button key={key} className={mode === key ? 'active' : ''} onClick={() => { setMode(key); setStarted(false) }}>{cfg.label}</button>
-          ))}
-        </div>
+        {!started ? (
+          <div className="mode-select">
+            {Object.entries(MODE_CONFIG).map(([key, cfg]) => (
+              <button key={key} className={mode === key ? 'active' : ''} onClick={() => { setMode(key); setStarted(false) }}>{cfg.label}</button>
+            ))}
+          </div>
+        ) : null}
         {!started ? (
           <div className="lobby-panel">
             <div className="lobby-name-display">Driving as <strong>{name}</strong></div>
@@ -1548,30 +1540,6 @@ export default function App({ playerName }) {
           </div>
         ) : null}
         <div className="status-panel">
-          <div>Active street</div>
-          <div className="status-value">{activeStreet}</div>
-          {activeArrondissement || activeQuartier ? (
-            <div className="status-location">
-              {[activeArrondissement, activeQuartier].filter(Boolean).join(' · ')}
-            </div>
-          ) : null}
-          <div className="status-row">
-            <span>Driver</span>
-            <strong>{name || 'Player'}</strong>
-          </div>
-          <div className="status-row">
-            <span>Speed</span>
-            <strong>{displayedSpeed} km/h</strong>
-          </div>
-          <div className="status-row">
-            <span>Heading</span>
-            <strong>{Math.round(heading)}°</strong>
-          </div>
-          <div className="center-toggle">
-            <label>
-              <input type="checkbox" checked={centerCar} onChange={(e) => setCenterCar(e.target.checked)} /> Center car
-            </label>
-          </div>
           <div className="center-toggle">
             <label>
               <input type="checkbox" checked={showStreetNames} onChange={(e) => setShowStreetNames(e.target.checked)} /> Street names
@@ -1609,7 +1577,7 @@ export default function App({ playerName }) {
         {countdown > 0 ? (
           <div className="countdown-overlay">{countdown}</div>
         ) : null}
-        <ScreenOverlay wind={wind} players={screenPlayers} items={screenItems} />
+        <ScreenOverlay wind={wind} players={screenPlayers} items={screenItems} started={started} name={name} speedKmh={displayedSpeed} />
       </div>
     </div>
   )

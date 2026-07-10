@@ -414,6 +414,15 @@
   z-index: 600;
 }
 
+.overlay-bottom-left {
+  position: absolute;
+  bottom: 18px;
+  left: 18px;
+  display: grid;
+  gap: 10px;
+  z-index: 600;
+}
+
 .mode-pill,
 .wind-pill {
   background: rgba(255, 255, 255, 0.92);
