@@ -385,8 +385,9 @@ export default function App({ playerName }) {
       .select('color, avatar_id')
       .eq('name_lower', name.toLowerCase())
       .maybeSingle()
-      .then(({ data }) => {
+      .then(({ data, error }) => {
         if (cancelled) return
+        if (error) console.error('Failed to load saved appearance:', error.message)
         if (data?.color) setSelectedColor(data.color)
         if (data?.avatar_id) setSelectedAvatarId(data.avatar_id)
         setAppearanceLoaded(true)
@@ -402,6 +403,9 @@ export default function App({ playerName }) {
       .from('online_players')
       .update({ color: selectedColor, avatar_id: selectedAvatarId })
       .eq('name_lower', name.toLowerCase())
+      .then(({ error }) => {
+        if (error) console.error('Failed to save appearance:', error.message)
+      })
   }, [selectedColor, selectedAvatarId, appearanceLoaded, name])
 
   const currentRoom = useMemo(
