@@ -4,6 +4,7 @@ import MapView from './MapView'
 import { CONFIG, THEMES } from './config'
 import { AVATAR_ICONS, DEFAULT_AVATAR_ID, getAvatarSvg } from './avatarIcons'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
+import { useRoomSync, generateRoomCode } from './roomSync'
 import {
   buildGraph,
   chooseNextSegment,
@@ -112,88 +113,6 @@ const defaultPosition = {
   speed: 0
 }
 
-const ROOM_STORAGE_KEY = 'mapdash_rooms'
-const ROOM_CHANNEL_NAME = 'mapdash_multiplayer'
-const isBroadcastChannelSupported = typeof window !== 'undefined' && 'BroadcastChannel' in window
-const roomChannel = isBroadcastChannelSupported ? new BroadcastChannel(ROOM_CHANNEL_NAME) : null
-
-function readStoredRooms() {
-  if (typeof window === 'undefined') return []
-  try {
-    const raw = window.localStorage.getItem(ROOM_STORAGE_KEY)
-    return raw ? JSON.parse(raw) : []
-  } catch {
-    return []
-  }
-}
-
-function persistRooms(rooms) {
-  if (typeof window === 'undefined') return
-  try {
-    window.localStorage.setItem(ROOM_STORAGE_KEY, JSON.stringify(rooms))
-  } catch {}
-}
-
-function postRoomSync(rooms) {
-  if (!roomChannel) return
-  try {
-    roomChannel.postMessage({ type: 'rooms', rooms })
-  } catch {}
-}
-
-function useRoomSync() {
-  const [rooms, setRooms] = useState([])
-
-  useEffect(() => {
-    const stored = readStoredRooms()
-    setRooms(stored)
-
-    const handleChannel = (event) => {
-      if (event?.data?.type === 'rooms' && Array.isArray(event.data.rooms)) {
-        persistRooms(event.data.rooms)
-        setRooms(event.data.rooms)
-      }
-    }
-
-    const handleStorage = (event) => {
-      if (event.key !== ROOM_STORAGE_KEY) return
-      if (!event.newValue) {
-        setRooms([])
-        return
-      }
-      try {
-        const next = JSON.parse(event.newValue)
-        if (Array.isArray(next)) setRooms(next)
-      } catch {}
-    }
-
-    roomChannel?.addEventListener('message', handleChannel)
-    window.addEventListener('storage', handleStorage)
-
-    return () => {
-      roomChannel?.removeEventListener('message', handleChannel)
-      window.removeEventListener('storage', handleStorage)
-    }
-  }, [])
-
-  const updateRooms = useCallback((nextRooms) => {
-    setRooms(nextRooms)
-    persistRooms(nextRooms)
-    postRoomSync(nextRooms)
-  }, [])
-
-  return [rooms, updateRooms]
-}
-
-function generateRoomCode() {
-  const letters = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
-  let code = ''
-  for (let i = 0; i < 5; i++) {
-    code += letters[Math.floor(Math.random() * letters.length)]
-  }
-  return code
-}
-
 function useDrivingControls(started, onControlsChange, onZoomChange) {
   useEffect(() => {
     if (!started) return
@@ -270,7 +189,7 @@ function ScreenOverlay({ wind, players = [] }) {
         <div className="mode-pill">Wind: {wind.direction} · {wind.speed} km/h</div>
       </div>
       {players.map((p) => (
-        <div key={p.id} className={`player-dot ${p.eliminated ? 'eliminated' : ''}`} style={{ left: `${p.screenX}%`, top: `${p.screenY}%`, background: p.color }} title={p.name} />
+        <div key={p.name} className={`player-dot ${p.eliminated ? 'eliminated' : ''}`} style={{ left: `${p.screenX}%`, top: `${p.screenY}%`, background: p.color }} title={p.name} />
       ))}
     </div>
   )
@@ -303,7 +222,6 @@ export default function App({ playerName }) {
   const [joinedRoomCode, setJoinedRoomCode] = useState(null)
   const [eliminated, setEliminated] = useState(false)
   const [gameMessage, setGameMessage] = useState('')
-  const [playerId] = useState(() => (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2)))
   const [countdown, setCountdown] = useState(0)
   const countdownRef = useRef(null)
   const [mapReady, setMapReady] = useState(false)
@@ -414,11 +332,36 @@ export default function App({ playerName }) {
   )
 
   const currentPlayer = useMemo(
-    () => currentRoom?.players.find((player) => player.id === playerId) || null,
-    [currentRoom, playerId]
+    () => currentRoom?.players.find((player) => player.name === name) || null,
+    [currentRoom, name]
   )
 
-  const isRoomHost = useMemo(() => currentRoom?.host === playerId, [currentRoom, playerId])
+  const isRoomHost = useMemo(() => currentRoom?.host === name, [currentRoom, name])
+
+  const roomChannelRef = useRef(null)
+  const lastBroadcastRef = useRef(0)
+  const [livePositions, setLivePositions] = useState({})
+
+  // Live position travels over an ephemeral Realtime Broadcast channel per room, never the
+  // database - only room structure (roster/status/clouds) is persisted via useRoomSync.
+  useEffect(() => {
+    setLivePositions({})
+    if (!isSupabaseConfigured || !joinedRoomCode) {
+      roomChannelRef.current = null
+      return
+    }
+    const channel = supabase.channel(`room:${joinedRoomCode}`)
+    channel.on('broadcast', { event: 'position' }, ({ payload }) => {
+      if (!payload || payload.name === name) return
+      setLivePositions((prev) => ({ ...prev, [payload.name]: payload }))
+    })
+    channel.subscribe()
+    roomChannelRef.current = channel
+    return () => {
+      supabase.removeChannel(channel)
+      roomChannelRef.current = null
+    }
+  }, [joinedRoomCode, name])
 
   useEffect(() => {
     if (!currentRoom) {
@@ -429,7 +372,7 @@ export default function App({ playerName }) {
     if (currentRoom.status === 'finished') {
       const winner = currentRoom.players.find((player) => !player.eliminated)
       if (winner) {
-        setGameMessage(winner.id === playerId ? 'You survived and won!' : `${winner.name} survived and won!`)
+        setGameMessage(winner.name === name ? 'You survived and won!' : `${winner.name} survived and won!`)
       } else {
         setGameMessage('All players were hit. Survival round ended.')
       }
@@ -448,7 +391,7 @@ export default function App({ playerName }) {
     }
 
     setGameMessage('')
-  }, [currentRoom, currentPlayer, playerId])
+  }, [currentRoom, currentPlayer, name])
 
   const mapRef = useRef(null)
   const movementRef = useRef({ distanceAlong: 0, direction: 1 })
@@ -463,20 +406,21 @@ export default function App({ playerName }) {
     return 0
   }, [controls, currentSegment])
 
+  // Throttled to ~8Hz so cross-device position sync stays well within the realtime message
+  // budget - this never touches Supabase's database, only the ephemeral broadcast channel.
   const syncPlayerState = useCallback(
     (pos, headingVal, speedVal) => {
-      if (!joinedRoomCode) return
-      setRooms((prev) =>
-        prev.map((room) => {
-          if (room.code !== joinedRoomCode) return room
-          const players = room.players.map((p) =>
-            p.id === playerId ? { ...p, position: { lat: pos.lat, lng: pos.lng }, heading: headingVal, speed: speedVal, lastSeen: Date.now() } : p
-          )
-          return { ...room, players }
-        })
-      )
+      if (!joinedRoomCode || !roomChannelRef.current) return
+      const nowMs = Date.now()
+      if (nowMs - lastBroadcastRef.current < 120) return
+      lastBroadcastRef.current = nowMs
+      roomChannelRef.current.send({
+        type: 'broadcast',
+        event: 'position',
+        payload: { name, lat: pos.lat, lng: pos.lng, heading: headingVal, speed: speedVal, eliminated }
+      })
     },
-    [joinedRoomCode, playerId, setRooms]
+    [joinedRoomCode, name, eliminated]
   )
 
   const zoomIn = () => setZoom((z) => Math.min(CONFIG.maxZoom, z + 1))
@@ -987,7 +931,7 @@ export default function App({ playerName }) {
     const nextRooms = rooms
       .map((room) => {
         if (room.code !== joinedRoomCode) return room
-        const remainingPlayers = room.players.filter((player) => player.id !== playerId)
+        const remainingPlayers = room.players.filter((player) => player.name !== name)
         if (!remainingPlayers.length) return null
         const nextRoom = {
           ...room,
@@ -1001,8 +945,8 @@ export default function App({ playerName }) {
               ? 'playing'
               : 'waiting'
         }
-        if (room.host === playerId) {
-          nextRoom.host = remainingPlayers[0].id
+        if (room.host === name) {
+          nextRoom.host = remainingPlayers[0].name
         }
         if (room.mode === 'survival' && nextRoom.status === 'finished' && remainingPlayers.length === 1) {
           nextRoom.players = remainingPlayers.map((player) => ({ ...player, eliminated: player.eliminated || false }))
@@ -1014,7 +958,7 @@ export default function App({ playerName }) {
     setRooms(nextRooms)
     setJoinedRoomCode(null)
     setStarted(false)
-  }, [joinedRoomCode, playerId, rooms, setRooms])
+  }, [joinedRoomCode, name, rooms, setRooms])
 
   const createRoom = useCallback(() => {
     const sanitizedName = name.trim() || 'Player'
@@ -1028,10 +972,10 @@ export default function App({ playerName }) {
     const newRoom = {
       code,
       mode,
-      host: playerId,
+      host: sanitizedName,
       status: mode === 'survival' ? 'waiting' : 'playing',
       createdAt: Date.now(),
-      players: [{ id: playerId, name: sanitizedName, color: selectedColor, eliminated: false, position: defaultPosition, heading: 0, speed: 0 }],
+      players: [{ name: sanitizedName, color: selectedColor, eliminated: false }],
       clouds: [],
       winnerId: null,
       maxPlayers: getRoomCapacity(mode)
@@ -1041,7 +985,7 @@ export default function App({ playerName }) {
     setJoinedRoomCode(code)
     setRoomCode(code)
     setStarted(mode === 'team')
-  }, [mode, name, roomCode, playerId, selectedColor, rooms, setRooms])
+  }, [mode, name, roomCode, selectedColor, rooms, setRooms])
 
   const joinRoom = useCallback(
     (codeToJoin) => {
@@ -1055,7 +999,8 @@ export default function App({ playerName }) {
         alert('Room not found.')
         return
       }
-      if (room.players.some((player) => player.id === playerId)) {
+      const sanitizedName = name.trim() || 'Player'
+      if (room.players.some((player) => player.name === sanitizedName)) {
         setJoinedRoomCode(code)
         setMode(room.mode)
         setStarted(room.status === 'playing' && !currentPlayer?.eliminated)
@@ -1067,8 +1012,7 @@ export default function App({ playerName }) {
       }
 
       const newPlayer = {
-        id: playerId,
-        name: name.trim() || 'Player',
+        name: sanitizedName,
         color: selectedColor,
         eliminated: false
       }
@@ -1085,7 +1029,7 @@ export default function App({ playerName }) {
       setMode(room.mode)
       setStarted(true)
     },
-    [playerId, roomCode, rooms, selectedColor, name, setRooms]
+    [roomCode, rooms, selectedColor, name, currentPlayer, setRooms]
   )
 
   const addCloud = () => {
@@ -1104,6 +1048,8 @@ export default function App({ playerName }) {
     window.setTimeout(() => setCloudCooldown(false), 10000)
   }
 
+  // Roster fields (color/eliminated) come from the persisted room; live lat/lng comes from the
+  // broadcast channel above - a player has no dot until their first broadcast arrives.
   const screenPlayers = useMemo(() => {
     if (!currentRoom || !mapRef.current) return []
     try {
@@ -1112,11 +1058,11 @@ export default function App({ playerName }) {
       const width = container.clientWidth
       const height = container.clientHeight
       return currentRoom.players
-        .filter((p) => p.id !== playerId && p.position)
+        .filter((p) => p.name !== name && livePositions[p.name])
         .map((p) => {
-          const point = map.project([p.position.lng, p.position.lat])
+          const live = livePositions[p.name]
+          const point = map.project([live.lng, live.lat])
           return {
-            id: p.id,
             name: p.name,
             color: p.color,
             eliminated: !!p.eliminated,
@@ -1127,7 +1073,7 @@ export default function App({ playerName }) {
     } catch {
       return []
     }
-  }, [currentRoom, playerId])
+  }, [currentRoom, name, livePositions])
 
   const checkCloudCollision = useCallback(() => {
     if (eliminated || !currentRoom || currentRoom.mode !== 'survival' || currentRoom.status !== 'playing') return false
@@ -1143,21 +1089,21 @@ export default function App({ playerName }) {
     const updatedRoom = {
       ...currentRoom,
       players: currentRoom.players.map((player) =>
-        player.id === playerId ? { ...player, eliminated: true } : player
+        player.name === name ? { ...player, eliminated: true } : player
       )
     }
 
     const survivors = updatedRoom.players.filter((player) => !player.eliminated)
     if (survivors.length === 1) {
       updatedRoom.status = 'finished'
-      updatedRoom.winnerId = survivors[0].id
+      updatedRoom.winnerId = survivors[0].name
     } else if (survivors.length === 0) {
       updatedRoom.status = 'finished'
       updatedRoom.winnerId = null
     }
 
     updateRoom(updatedRoom.code, () => updatedRoom)
-  }, [currentRoom, eliminated, playerId, updateRoom])
+  }, [currentRoom, eliminated, name, updateRoom])
 
   useEffect(() => {
     if (!started || eliminated || !currentRoom) return
@@ -1228,7 +1174,7 @@ export default function App({ playerName }) {
             ) : null}
             {currentRoom && currentRoom.status === 'finished' ? (
               <div className="room-finished">
-                <div>{currentRoom.winnerId ? `${currentRoom.players.find((p) => p.id === currentRoom.winnerId)?.name || 'Winner'} won` : 'Round finished'}</div>
+                <div>{currentRoom.winnerId ? `${currentRoom.winnerId} won` : 'Round finished'}</div>
                 {isRoomHost ? (
                   <button className="cloud-button" onClick={restartRoom}>Restart round</button>
                 ) : null}
@@ -1261,7 +1207,7 @@ export default function App({ playerName }) {
           <div className="room-meta">
             <div>Room <strong>{currentRoom.code}</strong></div>
             <div>Status: <strong>{currentRoom.status}</strong></div>
-            <div>Host: <strong>{currentRoom.players.find((p) => p.id === currentRoom.host)?.name || 'Host'}</strong></div>
+            <div>Host: <strong>{currentRoom.host || 'Host'}</strong></div>
             {isRoomHost ? (
               <div className="host-controls">
                 {currentRoom.status !== 'playing' ? (
@@ -1278,7 +1224,7 @@ export default function App({ playerName }) {
           <div className="room-player-list">
             <div className="room-player-title">Players</div>
             {currentRoom.players.map((player) => (
-              <div key={player.id} className="room-player-item">
+              <div key={player.name} className="room-player-item">
                 <span style={{ color: player.color }}>{player.name}</span>
                 {player.eliminated ? <span className="player-status">Eliminated</span> : <span className="player-status active">Alive</span>}
               </div>
