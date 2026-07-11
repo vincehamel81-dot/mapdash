@@ -50,7 +50,7 @@ const DEBUG_ROUND_MS = (() => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null
 })()
 
-const MODE_CONFIG = {
+export const MODE_CONFIG = {
   single: { label: 'Single', roomBased: false, hostGatedStart: false, minPlayers: 1, maxPlayers: 1, roundDurationMs: null },
   team: { label: 'Team', roomBased: true, hostGatedStart: false, minPlayers: 2, maxPlayers: 4, roundDurationMs: null },
   survival: { label: 'Survival', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 6, roundDurationMs: DEBUG_ROUND_MS ?? 10 * 60 * 1000 },
@@ -131,24 +131,44 @@ function seededRandom(seedStr) {
   }
 }
 
+// Chaikin's corner-cutting: replaces every edge of a closed polygon with two points 25%/75%
+// along it, which rounds off every corner without needing bezier/spline math. A few iterations
+// turn a small irregular polygon into a smooth wavy closed curve - real clouds' lumpy-but-round
+// silhouette, not a perfect circle (too uniform) and not a raw many-cornered polygon (too spiky).
+function chaikinSmooth(points, iterations) {
+  let pts = points
+  for (let iter = 0; iter < iterations; iter++) {
+    const next = []
+    const n = pts.length
+    for (let i = 0; i < n; i++) {
+      const p0 = pts[i]
+      const p1 = pts[(i + 1) % n]
+      next.push([p0[0] * 0.75 + p1[0] * 0.25, p0[1] * 0.75 + p1[1] * 0.25])
+      next.push([p0[0] * 0.25 + p1[0] * 0.75, p0[1] * 0.25 + p1[1] * 0.75])
+    }
+    pts = next
+  }
+  return pts
+}
+
 // Real clouds aren't circles, and shouldn't render as one: build an irregular blob polygon in
 // real lat/lng meters around the cloud's center. Because it's genuine geometry (not a pixel
 // radius), it scales correctly with zoom for free through MapLibre's normal projection - no
 // zoom-expression math needed at all, unlike the circle-radius approach this replaces.
 function cloudPolygonCoords(cloud) {
   const rand = seededRandom(cloud.id)
-  // High vertex count + minimal jitter/radius variance reads as a smooth, soft, rounded shape -
-  // this is purely visual (collision is a separate, simple radius check against cloud.radiusMeters
-  // in the tick loop, never the polygon's exact vertices), so there's no accuracy tradeoff in
-  // making this as round as looks good.
-  const vertexCount = 72 + Math.floor(rand() * 12)
-  const points = []
-  for (let i = 0; i < vertexCount; i++) {
-    const angle = (360 * i) / vertexCount + (rand() - 0.5) * 1
-    const radiusFactor = 0.96 + rand() * 0.06
+  // A handful of irregular "lobe" points (real variance, not just tiny jitter) run through
+  // Chaikin smoothing - this is purely visual (collision is a separate, simple radius check
+  // against cloud.radiusMeters in the tick loop, never the polygon's exact vertices).
+  const lobeCount = 8 + Math.floor(rand() * 4)
+  const base = []
+  for (let i = 0; i < lobeCount; i++) {
+    const angle = (360 * i) / lobeCount + (rand() - 0.5) * 15
+    const radiusFactor = 0.75 + rand() * 0.4
     const [lat, lng] = offsetLatLng([cloud.lat, cloud.lng], angle, cloud.radiusMeters * radiusFactor)
-    points.push([lng, lat])
+    base.push([lng, lat])
   }
+  const points = chaikinSmooth(base, 3)
   points.push(points[0])
   return points
 }
@@ -269,7 +289,12 @@ function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh
         <div className="mode-pill">Wind: {wind.direction} · {wind.speed} km/h</div>
         {started ? (
           <div className="mode-pill compass-pill">
-            <span ref={compassRef} className="compass-arrow">N</span>
+            <svg ref={compassRef} className="compass-arrow" viewBox="0 0 24 24" width="22" height="22">
+              <path d="M12 2 L16 12 L12 9.5 Z" fill="#e53935" />
+              <path d="M12 22 L16 12 L12 14.5 Z" fill="#9aa0a6" />
+              <path d="M12 2 L8 12 L12 9.5 Z" fill="#e53935" />
+              <path d="M12 22 L8 12 L12 14.5 Z" fill="#9aa0a6" />
+            </svg>
           </div>
         ) : null}
       </div>
@@ -287,7 +312,9 @@ function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh
       ))}
       {items.map((item) => (
         <div key={item.id} className="item-marker" style={{ left: `${item.screenX}%`, top: `${item.screenY}%` }}>
-          {item.label ? <div className="item-marker-label">{item.label}</div> : null}
+          {item.label ? (
+            <div className={`item-marker-label${item.screenY < 12 ? ' item-marker-label-below' : ''}`}>{item.label}</div>
+          ) : null}
           <div className="item-marker-icon" dangerouslySetInnerHTML={{ __html: getAvatarSvg(item.iconId) }} />
         </div>
       ))}
@@ -346,10 +373,16 @@ export default function App({ playerName, renameName, joinRequest }) {
   const spawnMarkerRef = useRef(null)
   const compassRef = useRef(null)
   const northUpModeRef = useRef(false)
+  const activeZoomGestureRef = useRef(false)
+  const themeIdRef = useRef('voyager')
 
   useEffect(() => {
     northUpModeRef.current = northUpMode
   }, [northUpMode])
+
+  useEffect(() => {
+    themeIdRef.current = themeId
+  }, [themeId])
 
   const handleMapReady = useCallback((map) => {
     mapRef.current = map
@@ -359,6 +392,12 @@ export default function App({ playerName, renameName, joinRequest }) {
     // else happened to trigger a re-render, which is exactly why item/player markers used to
     // visibly drift or vanish while panning/zooming instead of tracking the map.
     map.on('move', () => setMapViewTick((t) => t + 1))
+    // The movement tick loop calls map.jumpTo(...) every frame while driving - jumpTo cancels any
+    // in-progress camera animation, which was silently killing MapLibre's own scroll-wheel zoom
+    // easing on the very next frame (looked like scroll-zoom "tries but blocks"). Skip the
+    // per-frame jumpTo while a zoom gesture is active so it can complete uninterrupted.
+    map.on('zoomstart', () => { activeZoomGestureRef.current = true })
+    map.on('zoomend', () => { activeZoomGestureRef.current = false })
     map.addSource('route', { type: 'geojson', data: polylineToGeoJSON([]) })
     map.addLayer({
       id: 'route',
@@ -686,18 +725,19 @@ export default function App({ playerName, renameName, joinRequest }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [joinedRoomCode])
 
-  // Lets ChatPanel show a "Join" button next to a friend who's currently in a room - it has no
-  // other way to know that, since rooms/online_players are otherwise unrelated tables.
+  // Lets ChatPanel show a "Join" button (and an in-game indicator + mode label) next to a friend
+  // who's currently in a room - it has no other way to know that, since rooms/online_players are
+  // otherwise unrelated tables.
   useEffect(() => {
     if (!isSupabaseConfigured) return
     supabase
       .from('online_players')
-      .update({ room_code: joinedRoomCode || null })
+      .update({ room_code: joinedRoomCode || null, room_mode: joinedRoomCode ? mode : null })
       .eq('name_lower', name.toLowerCase())
       .then(({ error }) => {
         if (error) console.error('Failed to sync room_code:', error.message)
       })
-  }, [joinedRoomCode, name])
+  }, [joinedRoomCode, mode, name])
 
   useEffect(() => {
     const onKey = (e) => {
@@ -973,13 +1013,18 @@ export default function App({ playerName, renameName, joinRequest }) {
         // without the camera snapping back to the default spawn on every animation frame.
         const map = mapRef.current
         if (map && startedRef.current) {
+          // Satellite is aerial photography, not a data-driven 3D scene (no building-height data
+          // exists to extrude), so there's no true first-person view available - tilting the
+          // camera over the flat photo is the closest approximation to "driving through the city"
+          // rather than looking straight down at it, per direct feedback.
+          const pitch = themeIdRef.current === 'satellite' ? 60 : 0
           if (northUpModeRef.current) {
             // Map stays pinned north-up; the car marker itself rotates to show real heading
             // instead (rotationAlignment: 'map'), so the turn-signal arrows - positioned via
             // plain child-relative CSS - rotate along with it and stay on the car's actual
             // left/right, same as a real turn signal.
             mapBearingRef.current = 0
-            map.jumpTo({ center: [posObj.lng, posObj.lat], bearing: 0 })
+            if (!activeZoomGestureRef.current) map.jumpTo({ center: [posObj.lng, posObj.lat], bearing: 0, pitch })
             carMarkerRef.current?.setRotationAlignment('map')
             carMarkerRef.current?.setRotation(displayedHeading)
           } else {
@@ -988,8 +1033,12 @@ export default function App({ playerName, renameName, joinRequest }) {
             const maxStep = MAX_BEARING_DEG_PER_SEC * dt
             const step = Math.max(-maxStep, Math.min(maxStep, rawDelta))
             mapBearingRef.current = normalizeAngle(currentBearing + step)
-            // Center car is no longer optional - it's the only supported behavior now.
-            map.jumpTo({ center: [posObj.lng, posObj.lat], bearing: mapBearingRef.current })
+            // Center car is no longer optional - it's the only supported behavior now. Skipped
+            // while a scroll-wheel zoom gesture is in progress (see the zoomstart/zoomend
+            // listeners in handleMapReady) so it doesn't cancel MapLibre's own zoom easing.
+            if (!activeZoomGestureRef.current) {
+              map.jumpTo({ center: [posObj.lng, posObj.lat], bearing: mapBearingRef.current, pitch })
+            }
             carMarkerRef.current?.setRotationAlignment('viewport')
             carMarkerRef.current?.setRotation(0)
           }
@@ -1123,13 +1172,15 @@ export default function App({ playerName, renameName, joinRequest }) {
       const isSurvival = liveRef.current.currentRoom?.mode === 'survival'
       const radiusMeters = randomCloudRadius(isSurvival ? 2 : 1)
       let lat, lng
-      // For survival, retry a few times to avoid spawning right on top of a player; accept the
-      // last candidate even if still close rather than spawning nothing.
-      for (let attempt = 0; attempt < (isSurvival ? 10 : 1); attempt++) {
+      // Retry a few times to avoid spawning right on top of a player - in every mode now, not
+      // just survival (cosmetic clouds spawning on top of you were still an immersion-breaking
+      // annoyance even without damage); accept the last candidate even if still close rather than
+      // spawning nothing.
+      for (let attempt = 0; attempt < 10; attempt++) {
         const bearing = Math.random() * 360
         const distance = 250 + Math.random() * 650
         ;[lat, lng] = offsetLatLng([anchor.lat, anchor.lng], bearing, distance)
-        if (!isSurvival || !isTooCloseToAnyPlayer(lat, lng, radiusMeters)) break
+        if (!isTooCloseToAnyPlayer(lat, lng, radiusMeters)) break
       }
       return {
         id: crypto.randomUUID(),
@@ -1804,7 +1855,6 @@ export default function App({ playerName, renameName, joinRequest }) {
                 </select>
               </label>
             </div>
-            <div className="turbo-hint">Hold Shift for Turbo</div>
             <button className={`cloud-button${turboButtonOn ? ' turbo-toggle-on' : ''}`} onClick={() => setTurboButtonOn((t) => !t)}>
               {turboButtonOn ? 'Turbo: ON' : 'Turbo'}
             </button>

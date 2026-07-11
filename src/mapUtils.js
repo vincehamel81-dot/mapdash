@@ -547,6 +547,22 @@ export function buildGraph(segments, {
   snapDanglingEndpoints(rawNodes, edges, dangleToleranceMeters)
 
   const nodes = mergeNearbyNodes(rawNodes, toleranceMeters)
+
+  // mergeNearbyNodes can produce degenerate zero/near-zero-length edges when both of an edge's
+  // endpoints happen to land on the same merged node - confirmed against the real dataset for a
+  // handful of tiny duplicate-point "Rue Sainte-Ursule" polyline fragments (a few source segments
+  // only ~1-3m long). Left in, these are phantom "streets" with an undefined heading that
+  // chooseNextSegment can still pick as a turn choice, which gets a car stuck unable to progress
+  // (0m of travel, no matter which way you steer) - exactly matching reports of mid-segment
+  // turning being "impossible" at a specific intersection. No real street is this short.
+  const MIN_EDGE_LENGTH_METERS = 2
+  for (const [id, edge] of edges) {
+    if (edge.lengthMeters < MIN_EDGE_LENGTH_METERS) edges.delete(id)
+  }
+  for (const node of nodes.values()) {
+    node.edges = node.edges.filter((edge) => edge.lengthMeters >= MIN_EDGE_LENGTH_METERS)
+  }
+
   return { nodes, edges }
 }
 

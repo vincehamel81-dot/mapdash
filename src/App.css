@@ -73,6 +73,12 @@
   cursor: pointer;
 }
 
+/* +/-, Quit, Turbo and Add cloud all share .cloud-button - doubled height per direct feedback
+   for bigger touch targets, without needing to duplicate this rule per button. */
+.cloud-button {
+  min-height: 56px;
+}
+
 .lobby-panel button:disabled,
 .cloud-button:disabled {
   background: #c2d4fc;
@@ -151,12 +157,12 @@
 }
 
 .room-player-list {
-  padding: 16px;
+  padding: 10px 16px;
   background: #ffffff;
   border-radius: 16px;
   border: 1px solid #e8eaed;
   display: grid;
-  gap: 10px;
+  gap: 2px;
 }
 
 .room-player-title {
@@ -194,6 +200,7 @@
   color: #202124;
   border: 1px solid #dfe1e5;
   padding: 12px 14px;
+  min-height: 56px;
   border-radius: 14px;
   cursor: pointer;
 }
@@ -217,12 +224,12 @@
 }
 
 .item-tracker {
-  padding: 16px;
+  padding: 10px 16px;
   background: #ffffff;
   border-radius: 16px;
   border: 1px solid #e8eaed;
   display: grid;
-  gap: 10px;
+  gap: 3px;
   max-height: 240px;
   overflow-y: auto;
 }
@@ -231,7 +238,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 12px;
+  padding: 5px 12px;
   background: #f8f9fa;
   border-radius: 12px;
 }
@@ -480,8 +487,6 @@
 
 .compass-arrow {
   display: inline-block;
-  font-weight: 900;
-  color: #e53935;
   transition: transform 0.05s linear;
 }
 
@@ -542,6 +547,15 @@
   font-weight: 700;
   color: #202124;
   box-shadow: 0 2px 6px rgba(0,0,0,0.18);
+}
+
+/* Items near the top edge of the map viewport had their label positioned above the icon get
+   clipped off entirely by .map-panel's overflow:hidden - flip it below the icon instead. */
+.item-marker-label-below {
+  bottom: auto;
+  top: 100%;
+  margin-bottom: 0;
+  margin-top: 4px;
 }
 
 .countdown-overlay {
@@ -681,11 +695,6 @@ body, html, #root {
   font-size: 0.85rem;
 }
 
-.turbo-hint {
-  font-size: 0.85rem;
-  color: #5f6368;
-}
-
 .cloud-button.turbo-toggle-on {
   background: #ffb400;
   color: #3a2a00;
@@ -709,6 +718,7 @@ body, html, #root {
   border: none;
   border-radius: 999px;
   padding: 12px 20px;
+  min-height: 56px;
   font-weight: 600;
   cursor: pointer;
   box-shadow: 0 10px 24px rgba(0,0,0,0.2);
@@ -794,6 +804,23 @@ body, html, #root {
 .chat-join {
   color: #1e8e3e !important;
   font-weight: 700;
+}
+
+.chat-ingame-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #34a853;
+  flex-shrink: 0;
+}
+
+.chat-contact-row .chat-ingame-label {
+  font-size: 0.7rem;
+  color: #5f6368;
+  background: #f1f3f4;
+  border-radius: 999px;
+  padding: 1px 8px;
 }
 
 .chat-feed {

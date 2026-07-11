@@ -1,14 +1,16 @@
 export const CONFIG = {
-  // Shrunk again (~75% of the previous span) per direct feedback that it was still too big for
-  // Finder items to feel reachable - recentered on CONFIG.startPosition itself (rather than the
-  // old bbox's geometric center) so the default spawn stays comfortably in the middle with margin
-  // on every side. Some real Quebec City streets near the old edges now fall outside this and are
-  // filtered out (see App.jsx) - accepted tradeoff, not a bug.
+  // Shrunk again (~80% of the previous span) and biased to extend less far south, per feedback
+  // that the box still crossed the St. Lawrence toward Lévis (city===Quebec already excludes all
+  // Lévis STREET data - see App.jsx - but the bbox rectangle itself, and hence how far the camera
+  // can pan/what basemap labels are visible, still reached across the river). North edge held
+  // fixed, south edge pulled up ~2.9km; east/west stay centered on CONFIG.startPosition. Some real
+  // Quebec City streets near the old edges now fall outside this and are filtered out - accepted
+  // tradeoff, not a bug.
   bbox: {
-    south: 46.7480,
-    west: -71.3170,
+    south: 46.7744,
+    west: -71.3007,
     north: 46.8800,
-    east: -71.0995
+    east: -71.1158
   },
   defaultZoom: 15,
   minZoom: 12,

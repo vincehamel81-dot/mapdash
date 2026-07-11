@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
+import { MODE_CONFIG } from './App'
 
 const MESSAGE_PAGE_SIZE = 100
+// Heartbeat writes last_seen every 20s (NameGate.jsx) - a stale row whose owner's tab crashed or
+// closed without the beforeunload cleanup firing (the only way it's otherwise removed) will just
+// stop getting fresher than this, so treat anything older as offline rather than showing it
+// forever. Generous 4.5x margin over the heartbeat interval to tolerate normal network hiccups.
+const ONLINE_STALE_MS = 90000
 
 // Each person has one message "wall" they post to; adding someone as a friend (a one-directional
 // follow) lets you read their wall. There's no per-pair DM thread - selecting yourself shows your
@@ -21,14 +27,21 @@ export default function ChatPanel({ myName, onRequestJoin }) {
     if (!isSupabaseConfigured) return
     let cancelled = false
 
-    supabase.from('online_players').select('name_lower, display_name, room_code').neq('name_lower', myNameLower).then(({ data }) => {
+    const fetchOnline = () =>
+      supabase
+        .from('online_players')
+        .select('name_lower, display_name, room_code, room_mode, last_seen')
+        .neq('name_lower', myNameLower)
+        .gte('last_seen', new Date(Date.now() - ONLINE_STALE_MS).toISOString())
+
+    fetchOnline().then(({ data }) => {
       if (!cancelled && data) setOnlinePlayers(data)
     })
 
     const channel = supabase
       .channel('online_players-changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'online_players' }, () => {
-        supabase.from('online_players').select('name_lower, display_name, room_code').neq('name_lower', myNameLower).then(({ data }) => {
+        fetchOnline().then(({ data }) => {
           if (data) setOnlinePlayers(data)
         })
       })
@@ -136,23 +149,34 @@ export default function ChatPanel({ myName, onRequestJoin }) {
             <div className="chat-contacts">
               <button className={selected === 'me' ? 'selected' : ''} onClick={() => setSelected('me')}>Me</button>
               <div className="chat-section-title">Friends</div>
-              {friends.map((f) => (
-                <div key={f.followed_name_lower} className="chat-contact-row">
-                  <button className={selected === f.followed_name_lower ? 'selected' : ''} onClick={() => setSelected(f.followed_name_lower)}>
-                    {f.followed_display_name}
-                  </button>
-                  {onlineByName.get(f.followed_name_lower)?.room_code ? (
-                    <button className="chat-join" onClick={() => onRequestJoin?.(onlineByName.get(f.followed_name_lower).room_code)} title="Join their room">Join</button>
-                  ) : null}
-                  <button className="chat-remove" onClick={() => removeFriend(f.followed_name_lower)} title="Remove friend">x</button>
-                </div>
-              ))}
+              {friends.map((f) => {
+                const online = onlineByName.get(f.followed_name_lower)
+                return (
+                  <div key={f.followed_name_lower} className="chat-contact-row">
+                    {online?.room_code ? <span className="chat-ingame-dot" title="In a game" /> : null}
+                    <button className={selected === f.followed_name_lower ? 'selected' : ''} onClick={() => setSelected(f.followed_name_lower)}>
+                      {f.followed_display_name}
+                    </button>
+                    {online?.room_code ? (
+                      <>
+                        {MODE_CONFIG[online.room_mode] ? <span className="chat-ingame-label">{MODE_CONFIG[online.room_mode].label}</span> : null}
+                        <button className="chat-join" onClick={() => onRequestJoin?.(online.room_code)} title="Join their room">Join</button>
+                      </>
+                    ) : null}
+                    <button className="chat-remove" onClick={() => removeFriend(f.followed_name_lower)} title="Remove friend">x</button>
+                  </div>
+                )
+              })}
               <div className="chat-section-title">Online</div>
               {onlinePlayers.map((p) => (
                 <div key={p.name_lower} className="chat-contact-row">
+                  {p.room_code ? <span className="chat-ingame-dot" title="In a game" /> : null}
                   <span>{p.display_name}</span>
                   {p.room_code ? (
-                    <button className="chat-join" onClick={() => onRequestJoin?.(p.room_code)} title="Join their room">Join</button>
+                    <>
+                      {MODE_CONFIG[p.room_mode] ? <span className="chat-ingame-label">{MODE_CONFIG[p.room_mode].label}</span> : null}
+                      <button className="chat-join" onClick={() => onRequestJoin?.(p.room_code)} title="Join their room">Join</button>
+                    </>
                   ) : null}
                   {friendLowerSet.has(p.name_lower) ? (
                     <span className="chat-following">following</span>
