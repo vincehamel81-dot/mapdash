@@ -1,14 +1,14 @@
 export const CONFIG = {
-  // Half the area of the box that just replaced the original ~60km-wide region (itself derived
-  // from `city === 'Québec'` segments' full extent - see git history for that math), shrunk
-  // toward the same center per direct user feedback that even "Quebec City proper" was still too
-  // big. Some real Quebec City streets near the old edges now fall outside this and are filtered
-  // out (see App.jsx) - accepted tradeoff, not a bug.
+  // Shrunk again (~75% of the previous span) per direct feedback that it was still too big for
+  // Finder items to feel reachable - recentered on CONFIG.startPosition itself (rather than the
+  // old bbox's geometric center) so the default spawn stays comfortably in the middle with margin
+  // on every side. Some real Quebec City streets near the old edges now fall outside this and are
+  // filtered out (see App.jsx) - accepted tradeoff, not a bug.
   bbox: {
-    south: 46.7663,
-    west: -71.4850,
-    north: 46.9417,
-    east: -71.1950
+    south: 46.7480,
+    west: -71.3170,
+    north: 46.8800,
+    east: -71.0995
   },
   defaultZoom: 15,
   minZoom: 12,
@@ -33,5 +33,13 @@ export const THEMES = {
     baseNoLabels: cartoTiles('light_nolabels'),
     baseWithLabels: cartoTiles('light_all'),
     attribution: '&copy; OpenStreetMap contributors'
+  },
+  // Esri's free World Imagery service - aerial/satellite photography, no separate "no labels"
+  // variant exists for it so both fields point at the same tile set.
+  satellite: {
+    name: 'Satellite',
+    baseNoLabels: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+    baseWithLabels: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+    attribution: 'Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics'
   }
 }

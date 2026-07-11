@@ -14,6 +14,12 @@
   gap: 18px;
   background: #ffffff;
   border-right: 1px solid #e8eaed;
+  /* Without this, tall sidebar content (room panels + a 10-item tracker in Finder mode) inflates
+     the whole grid row past 100vh, stretching .map-panel along with it and pushing
+     .active-street-banner (positioned near the panel's own bottom) below the viewport, clipped by
+     .app-shell's overflow:hidden - it existed in the DOM with the right text, just invisible. */
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .mode-select {
@@ -462,6 +468,23 @@
   font-weight: 700;
 }
 
+.compass-pill {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+}
+
+.compass-arrow {
+  display: inline-block;
+  font-weight: 900;
+  color: #e53935;
+  transition: transform 0.05s linear;
+}
+
 .center-toggle { display:flex; align-items:center; gap:8px; font-size:0.9rem }
 .center-toggle input { transform: scale(1.1) }
 .center-toggle label { display: flex; align-items: center; gap: 6px; white-space: nowrap }
@@ -497,6 +520,28 @@
 .item-marker svg {
   width: 100%;
   height: 100%;
+}
+
+.item-marker-icon {
+  width: 100%;
+  height: 100%;
+}
+
+.item-marker-label {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-bottom: 4px;
+  white-space: nowrap;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #202124;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.18);
 }
 
 .countdown-overlay {
@@ -744,6 +789,11 @@ body, html, #root {
 .chat-following {
   font-size: 0.75rem;
   color: #9aa0a6;
+}
+
+.chat-join {
+  color: #1e8e3e !important;
+  font-weight: 700;
 }
 
 .chat-feed {

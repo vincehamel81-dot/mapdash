@@ -3,6 +3,7 @@ import maplibregl from 'maplibre-gl'
 import MapView from './MapView'
 import { CONFIG, THEMES } from './config'
 import { AVATAR_ICONS, DEFAULT_AVATAR_ID, getAvatarSvg } from './avatarIcons'
+import { FINDER_ITEMS } from './finderItems'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { useRoomSync, generateRoomCode } from './roomSync'
 import {
@@ -59,9 +60,15 @@ const MODE_CONFIG = {
 }
 
 const CLOUD_DAMAGE_PER_SEC = { white: 30, gray: 100, black: 250 }
-const FINDER_ITEM_ICON_IDS = ['cat', 'dog', 'apple', 'banana', 'cherry', 'gift', 'puzzle', 'heart', 'star', 'crown']
 const FINDER_PICKUP_RADIUS_METERS = 15
 const TAG_CONTACT_RADIUS_METERS = 8
+
+// Finished rooms auto-restart within ~3s if the host is still around (see the auto-restart
+// effect below) - one that's stayed 'finished' well past that is almost certainly abandoned
+// (host disconnected), so hide it from the join list rather than leaving it joinable forever.
+function isRoomStale(room) {
+  return room.status === 'finished' && Date.now() - (room.updatedAt || 0) > 60000
+}
 
 function randomCloudTier() {
   const r = Math.random()
@@ -134,11 +141,11 @@ function cloudPolygonCoords(cloud) {
   // this is purely visual (collision is a separate, simple radius check against cloud.radiusMeters
   // in the tick loop, never the polygon's exact vertices), so there's no accuracy tradeoff in
   // making this as round as looks good.
-  const vertexCount = 48 + Math.floor(rand() * 10)
+  const vertexCount = 72 + Math.floor(rand() * 12)
   const points = []
   for (let i = 0; i < vertexCount; i++) {
-    const angle = (360 * i) / vertexCount + (rand() - 0.5) * 2
-    const radiusFactor = 0.94 + rand() * 0.1
+    const angle = (360 * i) / vertexCount + (rand() - 0.5) * 1
+    const radiusFactor = 0.96 + rand() * 0.06
     const [lat, lng] = offsetLatLng([cloud.lat, cloud.lng], angle, cloud.radiusMeters * radiusFactor)
     points.push([lng, lat])
   }
@@ -158,10 +165,12 @@ function cloudsToGeoJSON(clouds) {
 }
 
 // Most clouds are modest, but occasionally (~15%) spawn a genuinely huge one spanning several
-// street blocks, per the "clouds should feel epic sometimes, not uniformly small" request.
+// street blocks, per the "clouds should feel epic sometimes, not uniformly small" request. The
+// big-cloud ceiling is doubled (220-1000m instead of 220-500m) per direct feedback that even the
+// biggest clouds should be bigger still - small-cloud range and the 15% rarity are unchanged.
 // Survival clouds are twice this size per the mode's rules (sizeMultiplier = 2).
 function randomCloudRadius(sizeMultiplier = 1) {
-  const base = Math.random() < 0.15 ? 220 + Math.random() * 280 : 20 + Math.random() * 70
+  const base = Math.random() < 0.15 ? 220 + Math.random() * 780 : 20 + Math.random() * 70
   return base * sizeMultiplier
 }
 
@@ -252,12 +261,17 @@ function useDrivingControls(started, onControlsChange, onZoomChange, onReverseTa
   }, [started, onControlsChange, onZoomChange, onReverseTap])
 }
 
-function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh, turboActive }) {
+function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh, turboActive, compassRef }) {
   return (
     <div className="screen-overlay">
       <div className="overlay-top-left">
         {started ? <div className="mode-pill">{name}</div> : null}
         <div className="mode-pill">Wind: {wind.direction} · {wind.speed} km/h</div>
+        {started ? (
+          <div className="mode-pill compass-pill">
+            <span ref={compassRef} className="compass-arrow">N</span>
+          </div>
+        ) : null}
       </div>
       {started ? (
         <div className="overlay-bottom-left">
@@ -272,18 +286,16 @@ function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh
         </div>
       ))}
       {items.map((item) => (
-        <div
-          key={item.id}
-          className="item-marker"
-          style={{ left: `${item.screenX}%`, top: `${item.screenY}%` }}
-          dangerouslySetInnerHTML={{ __html: getAvatarSvg(item.iconId) }}
-        />
+        <div key={item.id} className="item-marker" style={{ left: `${item.screenX}%`, top: `${item.screenY}%` }}>
+          {item.label ? <div className="item-marker-label">{item.label}</div> : null}
+          <div className="item-marker-icon" dangerouslySetInnerHTML={{ __html: getAvatarSvg(item.iconId) }} />
+        </div>
       ))}
     </div>
   )
 }
 
-export default function App({ playerName, renameName }) {
+export default function App({ playerName, renameName, joinRequest }) {
   const [mode, setMode] = useState('single')
   const [started, setStarted] = useState(false)
   const [zoom, setZoom] = useState(CONFIG.defaultZoom)
@@ -316,6 +328,9 @@ export default function App({ playerName, renameName }) {
   const countdownRef = useRef(null)
   const [mapReady, setMapReady] = useState(false)
   const [showStreetNames, setShowStreetNames] = useState(true)
+  const [showRouteLine, setShowRouteLine] = useState(false)
+  const [northUpMode, setNorthUpMode] = useState(false)
+  const [themeId, setThemeId] = useState('voyager')
   const [turboButtonOn, setTurboButtonOn] = useState(false)
   const [renamingOpen, setRenamingOpen] = useState(false)
   const [renameInput, setRenameInput] = useState('')
@@ -329,6 +344,12 @@ export default function App({ playerName, renameName }) {
   const carMarkerRef = useRef(null)
   const carMarkerElRef = useRef(null)
   const spawnMarkerRef = useRef(null)
+  const compassRef = useRef(null)
+  const northUpModeRef = useRef(false)
+
+  useEffect(() => {
+    northUpModeRef.current = northUpMode
+  }, [northUpMode])
 
   const handleMapReady = useCallback((map) => {
     mapRef.current = map
@@ -343,6 +364,7 @@ export default function App({ playerName, renameName }) {
       id: 'route',
       type: 'line',
       source: 'route',
+      layout: { visibility: 'none' },
       paint: { 'line-color': '#ffb400', 'line-width': 6, 'line-opacity': 0.9 }
     })
     map.addSource('clouds', { type: 'geojson', data: cloudsToGeoJSON([]) })
@@ -664,6 +686,13 @@ export default function App({ playerName, renameName }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [joinedRoomCode])
 
+  // Lets ChatPanel show a "Join" button next to a friend who's currently in a room - it has no
+  // other way to know that, since rooms/online_players are otherwise unrelated tables.
+  useEffect(() => {
+    if (!isSupabaseConfigured) return
+    supabase.from('online_players').update({ room_code: joinedRoomCode || null }).eq('name_lower', name.toLowerCase())
+  }, [joinedRoomCode, name])
+
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === 'Escape') {
@@ -908,7 +937,7 @@ export default function App({ playerName, renameName }) {
             )
             if (found) {
               const nextFoundItems = [...live.foundItems, found.id]
-              const wonRound = nextFoundItems.length >= FINDER_ITEM_ICON_IDS.length
+              const wonRound = nextFoundItems.length >= FINDER_ITEMS.length
               live.updateRoom(room.code, (r) => ({
                 ...r,
                 items: r.items.map((i) => (i.id === found.id ? { ...i, foundBy: live.name } : i)),
@@ -938,14 +967,28 @@ export default function App({ playerName, renameName }) {
         // without the camera snapping back to the default spawn on every animation frame.
         const map = mapRef.current
         if (map && startedRef.current) {
-          const currentBearing = mapBearingRef.current
-          const rawDelta = ((displayedHeading - currentBearing + 540) % 360) - 180
-          const maxStep = MAX_BEARING_DEG_PER_SEC * dt
-          const step = Math.max(-maxStep, Math.min(maxStep, rawDelta))
-          mapBearingRef.current = normalizeAngle(currentBearing + step)
-          // Center car is no longer optional - it's the only supported behavior now.
-          map.jumpTo({ center: [posObj.lng, posObj.lat], bearing: mapBearingRef.current })
+          if (northUpModeRef.current) {
+            // Map stays pinned north-up; the car marker itself rotates to show real heading
+            // instead (rotationAlignment: 'map'), so the turn-signal arrows - positioned via
+            // plain child-relative CSS - rotate along with it and stay on the car's actual
+            // left/right, same as a real turn signal.
+            mapBearingRef.current = 0
+            map.jumpTo({ center: [posObj.lng, posObj.lat], bearing: 0 })
+            carMarkerRef.current?.setRotationAlignment('map')
+            carMarkerRef.current?.setRotation(displayedHeading)
+          } else {
+            const currentBearing = mapBearingRef.current
+            const rawDelta = ((displayedHeading - currentBearing + 540) % 360) - 180
+            const maxStep = MAX_BEARING_DEG_PER_SEC * dt
+            const step = Math.max(-maxStep, Math.min(maxStep, rawDelta))
+            mapBearingRef.current = normalizeAngle(currentBearing + step)
+            // Center car is no longer optional - it's the only supported behavior now.
+            map.jumpTo({ center: [posObj.lng, posObj.lat], bearing: mapBearingRef.current })
+            carMarkerRef.current?.setRotationAlignment('viewport')
+            carMarkerRef.current?.setRotation(0)
+          }
           carMarkerRef.current?.setLngLat([posObj.lng, posObj.lat])
+          if (compassRef.current) compassRef.current.style.transform = `rotate(${-mapBearingRef.current}deg)`
           const routeSource = map.getSource?.('route')
           if (routeSource) routeSource.setData(polylineToGeoJSON(nextSegment.polyline))
         }
@@ -983,6 +1026,12 @@ export default function App({ playerName, renameName }) {
     const source = map.getSource('clouds')
     if (source) source.setData(cloudsToGeoJSON(clouds))
   }, [clouds, mapReady])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !mapReady) return
+    map.setLayoutProperty('route', 'visibility', showRouteLine ? 'visible' : 'none')
+  }, [showRouteLine, mapReady])
 
   useEffect(() => {
     const map = mapRef.current
@@ -1043,7 +1092,7 @@ export default function App({ playerName, renameName }) {
     const updateWind = () => {
       const directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
       const direction = directions[Math.floor(Math.random() * directions.length)]
-      const speed = Math.floor(10 + Math.random() * 30)
+      const speed = Math.floor(20 + Math.random() * 60)
       setWind({ direction, speed, angle: CARDINAL_ANGLES[direction] })
     }
 
@@ -1053,15 +1102,20 @@ export default function App({ playerName, renameName }) {
   }, [])
 
   useEffect(() => {
-    const isTooCloseToAnyPlayer = (lat, lng) => {
+    // Checked against radiusMeters + a flat 50m safety margin, not just a flat 50m from the
+    // center point - a big cloud (up to ~1000m radius in survival) spawning 51m from a player
+    // would otherwise cover them instantly even though the center point "passed" a flat check.
+    const isTooCloseToAnyPlayer = (lat, lng, radiusMeters) => {
       const live = liveRef.current
       const self = positionRef.current
-      if (self && haversine([lat, lng], [self.lat, self.lng]) < 50) return true
-      return Object.values(live.livePositions || {}).some((p) => haversine([lat, lng], [p.lat, p.lng]) < 50)
+      const threshold = radiusMeters + 50
+      if (self && haversine([lat, lng], [self.lat, self.lng]) < threshold) return true
+      return Object.values(live.livePositions || {}).some((p) => haversine([lat, lng], [p.lat, p.lng]) < threshold)
     }
 
     const spawnCloudNear = (anchor) => {
       const isSurvival = liveRef.current.currentRoom?.mode === 'survival'
+      const radiusMeters = randomCloudRadius(isSurvival ? 2 : 1)
       let lat, lng
       // For survival, retry a few times to avoid spawning right on top of a player; accept the
       // last candidate even if still close rather than spawning nothing.
@@ -1069,13 +1123,13 @@ export default function App({ playerName, renameName }) {
         const bearing = Math.random() * 360
         const distance = 250 + Math.random() * 650
         ;[lat, lng] = offsetLatLng([anchor.lat, anchor.lng], bearing, distance)
-        if (!isSurvival || !isTooCloseToAnyPlayer(lat, lng)) break
+        if (!isSurvival || !isTooCloseToAnyPlayer(lat, lng, radiusMeters)) break
       }
       return {
         id: crypto.randomUUID(),
         lat,
         lng,
-        radiusMeters: randomCloudRadius(isSurvival ? 2 : 1),
+        radiusMeters,
         // Every mode's clouds get a visual tier now, not just Survival's - it only *drives damage*
         // in Survival (gated separately, in the tick loop), everywhere else it's purely cosmetic.
         tier: randomCloudTier()
@@ -1178,14 +1232,13 @@ export default function App({ playerName, renameName }) {
     (players, roomMode) => {
       const { players: nextPlayers, itName } = resetPlayersForRound(players, roomMode)
       const isFinder = roomMode === 'finder-easy' || roomMode === 'finder-hard'
-      // Bias items toward wherever the round is actually starting instead of anywhere in the
-      // whole playable bbox - otherwise items landed scattered across the whole map regardless of
-      // where anyone actually is, which read as "half of these are unreachable."
-      const anchor = positionRef.current || pickedSpawn || CONFIG.startPosition
+      // Uniform across the whole playable bbox (not anchored to any one player's spawn) - a room
+      // has multiple players starting at different points, so biasing toward a single anchor
+      // unfairly favored whoever's position happened to trigger the round build.
       const items = isFinder && graph
-        ? FINDER_ITEM_ICON_IDS.map((iconId, i) => {
-            const pt = pickRandomStreetPoint(graph, { near: [anchor.lat, anchor.lng], maxDistanceMeters: 2500 }) || defaultPosition
-            return { id: `item-${i}-${crypto.randomUUID()}`, iconId, lat: pt.lat, lng: pt.lng, foundBy: null }
+        ? FINDER_ITEMS.map((def, i) => {
+            const pt = pickRandomStreetPoint(graph) || defaultPosition
+            return { id: `item-${i}-${crypto.randomUUID()}`, iconId: def.iconId, label: def.label, lat: pt.lat, lng: pt.lng, foundBy: null }
           })
         : []
       return { players: nextPlayers, itName, items, roundStartedAt: Date.now() }
@@ -1395,6 +1448,10 @@ export default function App({ playerName, renameName }) {
         setStarted(room.status === 'playing' && !currentPlayer?.eliminated)
         return
       }
+      if (MODE_CONFIG[room.mode]?.hostGatedStart && room.status === 'playing') {
+        alert('This round has already started.')
+        return
+      }
       if (room.players.length >= room.maxPlayers) {
         alert('This room is full.')
         return
@@ -1423,6 +1480,18 @@ export default function App({ playerName, renameName }) {
     },
     [roomCode, rooms, selectedColor, name, currentPlayer, setRooms]
   )
+
+  // "Join" from ChatPanel: App and ChatPanel are sibling components with no shared state, so
+  // main.jsx lifts one small piece of cross-component command state - `joinRequest` - and this
+  // effect just forwards it into the existing joinRoom flow (which already applies every normal
+  // join rule: full-room/already-started checks, etc).
+  const lastJoinRequestRef = useRef(null)
+  useEffect(() => {
+    if (!joinRequest || joinRequest.ts === lastJoinRequestRef.current) return
+    lastJoinRequestRef.current = joinRequest.ts
+    joinRoom(joinRequest.code)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [joinRequest])
 
   const addCloud = () => {
     if (cloudCooldown || eliminated) return
@@ -1489,7 +1558,7 @@ export default function App({ playerName, renameName }) {
         .filter((item) => !foundIds.includes(item.id))
         .map((item) => {
           const point = map.project([item.lng, item.lat])
-          return { id: item.id, iconId: item.iconId, screenX: (point.x / width) * 100, screenY: (point.y / height) * 100 }
+          return { id: item.id, iconId: item.iconId, label: item.label, screenX: (point.x / width) * 100, screenY: (point.y / height) * 100 }
         })
     } catch {
       return []
@@ -1561,7 +1630,7 @@ export default function App({ playerName, renameName }) {
               {currentRoom.mode === 'survival' ? (
                 <span className="player-status active">{Math.round(isSelf ? health : live?.health ?? player.health ?? 1000)} HP</span>
               ) : currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard' ? (
-                <span className="player-status active">{isSelf ? (player.foundItems || []).length : live?.foundCount ?? 0}/{FINDER_ITEM_ICON_IDS.length}</span>
+                <span className="player-status active">{isSelf ? (player.foundItems || []).length : live?.foundCount ?? 0}/{FINDER_ITEMS.length}</span>
               ) : player.eliminated ? (
                 <span className="player-status">Eliminated</span>
               ) : (
@@ -1573,11 +1642,11 @@ export default function App({ playerName, renameName }) {
       </div>
       {currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard' ? (
         <div className="item-tracker">
-          <div className="room-player-title">Items ({(currentPlayer?.foundItems || []).length}/{FINDER_ITEM_ICON_IDS.length})</div>
+          <div className="room-player-title">Items ({(currentPlayer?.foundItems || []).length}/{FINDER_ITEMS.length})</div>
           {itemDistances.map((item) => (
             <div key={item.id} className={`item-tracker-item${item.found ? ' item-tracker-found' : ''}`}>
               <span className="item-tracker-icon" style={{ color: selectedColor }} dangerouslySetInnerHTML={{ __html: getAvatarSvg(item.iconId) }} />
-              <span>{item.found ? 'Found!' : `${Math.round(item.distanceMeters)} m`}</span>
+              <span>{item.label ? `${item.label} — ` : ''}{item.found ? 'Found!' : `${Math.round(item.distanceMeters)} m`}</span>
             </div>
           ))}
         </div>
@@ -1680,9 +1749,9 @@ export default function App({ playerName, renameName }) {
                 {MODE_CONFIG[mode]?.roomBased && !joinedRoomCode ? (
                   <div className="room-list">
                     <div className="room-list-title">Available rooms</div>
-                    {rooms.filter((room) => room.mode === mode && room.status !== 'closed').length ? (
+                    {rooms.filter((room) => room.mode === mode && room.status !== 'closed' && !isRoomStale(room)).length ? (
                       rooms
-                        .filter((room) => room.mode === mode && room.status !== 'closed')
+                        .filter((room) => room.mode === mode && room.status !== 'closed' && !isRoomStale(room))
                         .map((room) => (
                           <div key={room.code} className="room-item">
                             <div>
@@ -1709,6 +1778,26 @@ export default function App({ playerName, renameName }) {
                 <input type="checkbox" checked={showStreetNames} onChange={(e) => setShowStreetNames(e.target.checked)} /> Street names
               </label>
             </div>
+            <div className="center-toggle">
+              <label>
+                <input type="checkbox" checked={showRouteLine} onChange={(e) => setShowRouteLine(e.target.checked)} /> Show route line
+              </label>
+            </div>
+            <div className="center-toggle">
+              <label>
+                <input type="checkbox" checked={northUpMode} onChange={(e) => setNorthUpMode(e.target.checked)} /> North-up fixed map
+              </label>
+            </div>
+            <div className="center-toggle">
+              <label>
+                Map style:{' '}
+                <select value={themeId} onChange={(e) => setThemeId(e.target.value)}>
+                  {Object.keys(THEMES).map((id) => (
+                    <option key={id} value={id}>{THEMES[id].name}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
             <div className="turbo-hint">Hold Shift for Turbo</div>
             <button className={`cloud-button${turboButtonOn ? ' turbo-toggle-on' : ''}`} onClick={() => setTurboButtonOn((t) => !t)}>
               {turboButtonOn ? 'Turbo: ON' : 'Turbo'}
@@ -1722,8 +1811,8 @@ export default function App({ playerName, renameName }) {
       </div>
       <div className="map-panel">
         <MapView
-          tileUrls={showStreetNames ? THEMES.voyager.baseWithLabels : THEMES.voyager.baseNoLabels}
-          attribution={THEMES.voyager.attribution}
+          tileUrls={showStreetNames ? THEMES[themeId].baseWithLabels : THEMES[themeId].baseNoLabels}
+          attribution={THEMES[themeId].attribution}
           center={{ lat: position.lat, lng: position.lng }}
           zoom={zoom}
           onReady={handleMapReady}
@@ -1746,7 +1835,7 @@ export default function App({ playerName, renameName }) {
         {countdown > 0 ? (
           <div className="countdown-overlay">{countdown}</div>
         ) : null}
-        <ScreenOverlay wind={wind} players={screenPlayers} items={screenItems} started={started} name={name} speedKmh={displayedSpeed} turboActive={turboActive} />
+        <ScreenOverlay wind={wind} players={screenPlayers} items={screenItems} started={started} name={name} speedKmh={displayedSpeed} turboActive={turboActive} compassRef={compassRef} />
       </div>
     </div>
   )

@@ -28,7 +28,8 @@ function rowToRoom(row) {
     itName: state.itName ?? null,
     // Fallback covers any room saved under the old singular-winnerId shape during rollout.
     winners: state.winners || (state.winnerId ? [state.winnerId] : []),
-    createdAt: state.createdAt ?? new Date(row.created_at).getTime()
+    createdAt: state.createdAt ?? new Date(row.created_at).getTime(),
+    updatedAt: new Date(row.updated_at).getTime()
   }
 }
 
@@ -47,7 +48,11 @@ function roomToRow(room) {
       itName: room.itName ?? null,
       winners: room.winners || [],
       createdAt: room.createdAt
-    }
+    },
+    // upsert doesn't auto-bump this on its own (no DB trigger exists) - set it explicitly on
+    // every write so staleness checks (e.g. hiding long-finished rooms) have something real to
+    // compare against.
+    updated_at: new Date().toISOString()
   }
 }
 

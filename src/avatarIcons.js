@@ -53,6 +53,7 @@ import train from 'lucide-static/icons/train-front.svg?raw'
 import helicopter from 'lucide-static/icons/helicopter.svg?raw'
 import ambulance from 'lucide-static/icons/ambulance.svg?raw'
 import truck from 'lucide-static/icons/truck.svg?raw'
+import candy from 'lucide-static/icons/candy.svg?raw'
 
 // The app's original marker shape, hand-kept here (not from lucide) using fill="currentColor" so
 // it recolors the same way as every other avatar, plus a dark outline so it stays visible even
@@ -113,7 +114,8 @@ export const AVATAR_ICONS = [
   { id: 'train', label: 'Train', svg: train },
   { id: 'helicopter', label: 'Helicopter', svg: helicopter },
   { id: 'ambulance', label: 'Ambulance', svg: ambulance },
-  { id: 'truck', label: 'Truck', svg: truck }
+  { id: 'truck', label: 'Truck', svg: truck },
+  { id: 'candy', label: 'Gummy candy', svg: candy }
 ]
 
 export const DEFAULT_AVATAR_ID = 'arrow'

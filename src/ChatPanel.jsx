@@ -7,7 +7,7 @@ const MESSAGE_PAGE_SIZE = 100
 // follow) lets you read their wall. There's no per-pair DM thread - selecting yourself shows your
 // own wall (read+write), selecting a friend shows theirs (read-only), matching the "one feed per
 // person, readable by their friends" model.
-export default function ChatPanel({ myName }) {
+export default function ChatPanel({ myName, onRequestJoin }) {
   const [open, setOpen] = useState(false)
   const [onlinePlayers, setOnlinePlayers] = useState([])
   const [friends, setFriends] = useState([])
@@ -21,14 +21,14 @@ export default function ChatPanel({ myName }) {
     if (!isSupabaseConfigured) return
     let cancelled = false
 
-    supabase.from('online_players').select('name_lower, display_name').neq('name_lower', myNameLower).then(({ data }) => {
+    supabase.from('online_players').select('name_lower, display_name, room_code').neq('name_lower', myNameLower).then(({ data }) => {
       if (!cancelled && data) setOnlinePlayers(data)
     })
 
     const channel = supabase
       .channel('online_players-changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'online_players' }, () => {
-        supabase.from('online_players').select('name_lower, display_name').neq('name_lower', myNameLower).then(({ data }) => {
+        supabase.from('online_players').select('name_lower, display_name, room_code').neq('name_lower', myNameLower).then(({ data }) => {
           if (data) setOnlinePlayers(data)
         })
       })
@@ -121,6 +121,7 @@ export default function ChatPanel({ myName }) {
   }, [draft, myNameLower, myName])
 
   const friendLowerSet = useMemo(() => new Set(friends.map((f) => f.followed_name_lower)), [friends])
+  const onlineByName = useMemo(() => new Map(onlinePlayers.map((p) => [p.name_lower, p])), [onlinePlayers])
 
   return (
     <div className={`chat-panel ${open ? 'open' : 'collapsed'}`}>
@@ -140,6 +141,9 @@ export default function ChatPanel({ myName }) {
                   <button className={selected === f.followed_name_lower ? 'selected' : ''} onClick={() => setSelected(f.followed_name_lower)}>
                     {f.followed_display_name}
                   </button>
+                  {onlineByName.get(f.followed_name_lower)?.room_code ? (
+                    <button className="chat-join" onClick={() => onRequestJoin?.(onlineByName.get(f.followed_name_lower).room_code)} title="Join their room">Join</button>
+                  ) : null}
                   <button className="chat-remove" onClick={() => removeFriend(f.followed_name_lower)} title="Remove friend">x</button>
                 </div>
               ))}
@@ -147,6 +151,9 @@ export default function ChatPanel({ myName }) {
               {onlinePlayers.map((p) => (
                 <div key={p.name_lower} className="chat-contact-row">
                   <span>{p.display_name}</span>
+                  {p.room_code ? (
+                    <button className="chat-join" onClick={() => onRequestJoin?.(p.room_code)} title="Join their room">Join</button>
+                  ) : null}
                   {friendLowerSet.has(p.name_lower) ? (
                     <span className="chat-following">following</span>
                   ) : (
