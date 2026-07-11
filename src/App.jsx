@@ -125,11 +125,13 @@ function seededRandom(seedStr) {
 // zoom-expression math needed at all, unlike the circle-radius approach this replaces.
 function cloudPolygonCoords(cloud) {
   const rand = seededRandom(cloud.id)
-  const vertexCount = 11 + Math.floor(rand() * 5)
+  // More vertices + tighter jitter/radius variance than a minimal blob reads as a soft, rounded
+  // shape instead of a jagged/pointy polygon.
+  const vertexCount = 18 + Math.floor(rand() * 6)
   const points = []
   for (let i = 0; i < vertexCount; i++) {
-    const angle = (360 * i) / vertexCount + (rand() - 0.5) * 14
-    const radiusFactor = 0.62 + rand() * 0.65
+    const angle = (360 * i) / vertexCount + (rand() - 0.5) * 6
+    const radiusFactor = 0.82 + rand() * 0.3
     const [lat, lng] = offsetLatLng([cloud.lat, cloud.lng], angle, cloud.radiusMeters * radiusFactor)
     points.push([lng, lat])
   }
@@ -268,7 +270,7 @@ function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh
   )
 }
 
-export default function App({ playerName }) {
+export default function App({ playerName, renameName }) {
   const [mode, setMode] = useState('single')
   const [started, setStarted] = useState(false)
   const [zoom, setZoom] = useState(CONFIG.defaultZoom)
@@ -297,6 +299,11 @@ export default function App({ playerName }) {
   const countdownRef = useRef(null)
   const [mapReady, setMapReady] = useState(false)
   const [showStreetNames, setShowStreetNames] = useState(true)
+  const [turboButtonOn, setTurboButtonOn] = useState(false)
+  const [renamingOpen, setRenamingOpen] = useState(false)
+  const [renameInput, setRenameInput] = useState('')
+  const [renameError, setRenameError] = useState('')
+  const [renaming, setRenaming] = useState(false)
   const [pickedSpawn, setPickedSpawn] = useState(null)
   const [pickingSpawn, setPickingSpawn] = useState(false)
   const mapBearingRef = useRef(0)
@@ -321,7 +328,7 @@ export default function App({ playerName }) {
       type: 'fill',
       source: 'clouds',
       paint: {
-        'fill-color': ['match', ['get', 'tier'], 'black', '#3c3f45', 'gray', '#9aa0a6', '#ffffff'],
+        'fill-color': ['match', ['get', 'tier'], 'black', '#353232', 'gray', '#969191', '#FFFFFF'],
         'fill-opacity': 0.9,
         'fill-outline-color': 'rgba(90,110,135,0.55)'
       }
@@ -533,18 +540,20 @@ export default function App({ playerName }) {
 
   const currentSegment = useMemo(() => graph?.edges.get(currentEdgeId) || null, [graph, currentEdgeId])
   const displayedSpeed = useMemo(() => {
-    const base = controls.forward ? currentSegment?.speedKmh ?? 50 : controls.reverse ? 25 : 0
+    // Doubled from the street's/reverse's raw value across the board - a 50 km/h street plays at
+    // 100 normal, 200 under Turbo.
+    const base = (controls.forward ? currentSegment?.speedKmh ?? 50 : controls.reverse ? 50 : 0) * 2
     // Tag's "It" drives 1.5x everyone else's speed - applied uniformly (including the fixed
     // reverse speed) so there's no exploit in reversing to dodge the buff.
     const isIt = currentRoom?.mode === 'tag' && currentRoom.itName === name
     if (isIt) return base * 1.5
-    // Turbo (hold Shift): unlimited use, doubles speed in every mode except Tag - It's 1.5x above
-    // is the only speed buff Tag allows, so turbo simply doesn't apply there.
-    const turboActive = controls.turbo && currentRoom?.mode !== 'tag'
+    // Turbo (hold Shift or the on-screen button): unlimited use, doubles speed in every mode
+    // except Tag - It's 1.5x above is the only speed buff Tag allows.
+    const turboActive = (controls.turbo || turboButtonOn) && currentRoom?.mode !== 'tag'
     return turboActive ? base * 2 : base
-  }, [controls, currentSegment, currentRoom, name])
+  }, [controls, currentSegment, currentRoom, name, turboButtonOn])
 
-  const turboActive = controls.turbo && (controls.forward || controls.reverse) && currentRoom?.mode !== 'tag'
+  const turboActive = (controls.turbo || turboButtonOn) && (controls.forward || controls.reverse) && currentRoom?.mode !== 'tag'
 
   // Throttled to ~8Hz so cross-device position sync stays well within the realtime message
   // budget - this never touches Supabase's database, only the ephemeral broadcast channel.
@@ -575,13 +584,35 @@ export default function App({ playerName }) {
   const zoomIn = () => setZoom((z) => Math.min(CONFIG.maxZoom, z + 1))
   const zoomOut = () => setZoom((z) => Math.max(CONFIG.minZoom, z - 1))
 
+  const submitRename = useCallback(async () => {
+    if (!renameName) return
+    setRenaming(true)
+    setRenameError('')
+    const result = await renameName(renameInput)
+    setRenaming(false)
+    if (result?.success) {
+      setRenamingOpen(false)
+      setRenameInput('')
+    } else {
+      setRenameError(result?.error || 'Could not rename right now.')
+    }
+  }, [renameName, renameInput])
+
   const quitGame = useCallback(() => {
-    setStarted(false)
-    setJoinedRoomCode(null)
+    // Quitting out of a room needs the same cleanup as clicking "Leave room" - just clearing
+    // joinedRoomCode locally left the player as a ghost member other clients still saw.
+    // leaveRoom is intentionally not in the deps array below: it's declared later in this
+    // component, so referencing it there (evaluated eagerly, unlike a callback body) would throw
+    // "Cannot access before initialization" on first render.
+    if (joinedRoomCode) {
+      leaveRoom()
+    } else {
+      setStarted(false)
+    }
     setEliminated(false)
-    // optional: reset position to default
     setPosition(defaultPosition)
-  }, [setStarted, setJoinedRoomCode])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [joinedRoomCode])
 
   useEffect(() => {
     const onKey = (e) => {
@@ -978,7 +1009,9 @@ export default function App({ playerName }) {
         lat,
         lng,
         radiusMeters: randomCloudRadius(isSurvival ? 2 : 1),
-        tier: isSurvival ? randomCloudTier() : null
+        // Every mode's clouds get a visual tier now, not just Survival's - it only *drives damage*
+        // in Survival (gated separately, in the tick loop), everywhere else it's purely cosmetic.
+        tier: randomCloudTier()
       }
     }
 
@@ -1033,7 +1066,7 @@ export default function App({ playerName }) {
     const anchor = pickedSpawn || CONFIG.startPosition
     const spawn = (bearing, distance) => {
       const [lat, lng] = offsetLatLng([anchor.lat, anchor.lng], bearing, distance)
-      return { id: crypto.randomUUID(), lat, lng, radiusMeters: randomCloudRadius() }
+      return { id: crypto.randomUUID(), lat, lng, radiusMeters: randomCloudRadius(), tier: randomCloudTier() }
     }
     setClouds([spawn(40, 350), spawn(200, 500)])
   }, [])
@@ -1322,7 +1355,7 @@ export default function App({ playerName }) {
     const bearing = Math.random() * 360
     const distance = 150 + Math.random() * 500
     const [lat, lng] = offsetLatLng([anchor.lat, anchor.lng], bearing, distance)
-    const newCloud = { id: crypto.randomUUID(), lat, lng, radiusMeters: randomCloudRadius() }
+    const newCloud = { id: crypto.randomUUID(), lat, lng, radiusMeters: randomCloudRadius(), tier: randomCloudTier() }
     if (currentRoom && isRoomHost) {
       updateRoom(currentRoom.code, (room) => ({ ...room, clouds: [...(room.clouds || []), newCloud].slice(-8) }))
     } else {
@@ -1411,93 +1444,123 @@ export default function App({ playerName }) {
   return (
     <div className="app-shell">
       <div className="app-sidebar">
-        {!started ? (
-          <div className="mode-select">
-            {Object.entries(MODE_CONFIG).map(([key, cfg]) => (
-              <button key={key} className={mode === key ? 'active' : ''} onClick={() => { setMode(key); setStarted(false) }}>{cfg.label}</button>
-            ))}
-          </div>
-        ) : null}
-        {!started ? (
-          <div className="lobby-panel">
-            <div className="lobby-name-display">Driving as <strong>{name}</strong></div>
-            <label>Car color</label>
-            <div className="color-picks">
-              {CAR_COLORS.map((color) => (
-                <button key={color} style={{ backgroundColor: color }} className={selectedColor === color ? 'selected' : ''} onClick={() => setSelectedColor(color)} />
-              ))}
-            </div>
-            <label>Avatar</label>
-            <div className="avatar-picks">
-              {AVATAR_ICONS.map((avatar) => (
-                <button
-                  key={avatar.id}
-                  className={selectedAvatarId === avatar.id ? 'selected' : ''}
-                  title={avatar.label}
-                  style={{ color: selectedColor }}
-                  onClick={() => setSelectedAvatarId(avatar.id)}
-                  dangerouslySetInnerHTML={{ __html: avatar.svg }}
-                />
-              ))}
-            </div>
-            <label>Start point</label>
-            <div className="start-point-picker">
-              <button
-                className={pickingSpawn ? 'selected' : ''}
-                onClick={() => setPickingSpawn((p) => !p)}
-              >
-                {pickingSpawn ? 'Click the map...' : pickedSpawn ? 'Change start point' : 'Pick start on map'}
-              </button>
-              {pickedSpawn ? (
-                <button onClick={() => { setPickedSpawn(null); setPickingSpawn(false) }}>Reset to default</button>
-              ) : null}
-            </div>
-            {MODE_CONFIG[mode]?.roomBased ? (
-              <>
-                <label>Room code</label>
-                <input value={roomCode} onChange={(e) => setRoomCode(e.target.value.toUpperCase())} placeholder="ROOM123" />
-                <div className="room-actions">
-                  <button onClick={() => joinRoom()}>Join room</button>
-                  <button onClick={createRoom}>Create room</button>
+        {!started && !pickingSpawn ? (
+          <div className="setup-modal-backdrop">
+            <div className="setup-modal-card">
+              <div className="mode-select">
+                {Object.entries(MODE_CONFIG).map(([key, cfg]) => (
+                  <button key={key} className={mode === key ? 'active' : ''} onClick={() => { setMode(key); setStarted(false) }}>{cfg.label}</button>
+                ))}
+              </div>
+              <div className="lobby-panel">
+                <div className="lobby-name-display">
+                  Driving as <strong>{name}</strong>
+                  {renameName && !joinedRoomCode ? (
+                    <button
+                      className="rename-pencil"
+                      title="Change name"
+                      onClick={() => { setRenamingOpen((o) => !o); setRenameInput(name); setRenameError('') }}
+                    >
+                      ✎
+                    </button>
+                  ) : null}
                 </div>
-              </>
-            ) : (
-              <button onClick={() => setStarted(true)}>Start driving</button>
-            )}
-            {joinedRoomCode && currentRoom && !started && currentRoom.status === 'waiting' ? (
-              <div className="room-waiting">
-                Waiting for another player to join room <strong>{joinedRoomCode}</strong>...
-                <button className="leave-room" onClick={leaveRoom}>Leave</button>
-              </div>
-            ) : null}
-            {currentRoom && currentRoom.status === 'finished' ? (
-              <div className="room-finished">
-                <div>{currentRoom.winners?.length ? `${currentRoom.winners.join(' & ')} won` : 'Round finished'}</div>
-                {isRoomHost ? (
-                  <button className="cloud-button" onClick={restartRoom}>Restart round</button>
+                {renamingOpen ? (
+                  <div className="rename-form">
+                    <input value={renameInput} onChange={(e) => setRenameInput(e.target.value)} maxLength={20} autoFocus />
+                    <div className="rename-actions">
+                      <button onClick={submitRename} disabled={renaming}>{renaming ? 'Saving...' : 'Save'}</button>
+                      <button className="leave-room" onClick={() => { setRenamingOpen(false); setRenameError('') }}>Cancel</button>
+                    </div>
+                    {renameError ? <div className="rename-error">{renameError}</div> : null}
+                  </div>
                 ) : null}
-                <button className="leave-room" onClick={closeRoom}>Leave room</button>
-              </div>
-            ) : null}
-            {MODE_CONFIG[mode]?.roomBased && !joinedRoomCode ? (
-              <div className="room-list">
-                <div className="room-list-title">Available rooms</div>
-                {rooms.filter((room) => room.mode === mode && room.status !== 'closed').length ? (
-                  rooms
-                    .filter((room) => room.mode === mode && room.status !== 'closed')
-                    .map((room) => (
-                      <div key={room.code} className="room-item">
-                        <div>
-                          <strong>{room.code}</strong> · {room.players.length}/{room.maxPlayers}
-                        </div>
-                        <button onClick={() => { setRoomCode(room.code); joinRoom(room.code) }}>Join</button>
-                      </div>
-                    ))
+                <label>Car color</label>
+                <div className="color-picks">
+                  {CAR_COLORS.map((color) => (
+                    <button key={color} style={{ backgroundColor: color }} className={selectedColor === color ? 'selected' : ''} onClick={() => setSelectedColor(color)} />
+                  ))}
+                </div>
+                <label>Avatar</label>
+                <div className="avatar-picks">
+                  {AVATAR_ICONS.map((avatar) => (
+                    <button
+                      key={avatar.id}
+                      className={selectedAvatarId === avatar.id ? 'selected' : ''}
+                      title={avatar.label}
+                      style={{ color: selectedColor }}
+                      onClick={() => setSelectedAvatarId(avatar.id)}
+                      dangerouslySetInnerHTML={{ __html: avatar.svg }}
+                    />
+                  ))}
+                </div>
+                <label>Start point</label>
+                <div className="start-point-picker">
+                  <button
+                    className={pickingSpawn ? 'selected' : ''}
+                    onClick={() => setPickingSpawn((p) => !p)}
+                  >
+                    {pickingSpawn ? 'Click the map...' : pickedSpawn ? 'Change start point' : 'Pick start on map'}
+                  </button>
+                  {pickedSpawn ? (
+                    <button onClick={() => { setPickedSpawn(null); setPickingSpawn(false) }}>Reset to default</button>
+                  ) : null}
+                </div>
+                {MODE_CONFIG[mode]?.roomBased ? (
+                  <>
+                    <label>Room code</label>
+                    <input value={roomCode} onChange={(e) => setRoomCode(e.target.value.toUpperCase())} placeholder="ROOM123" />
+                    <div className="room-actions">
+                      <button onClick={() => joinRoom()}>Join room</button>
+                      <button onClick={createRoom}>Create room</button>
+                    </div>
+                  </>
                 ) : (
-                  <div className="room-empty">No rooms available yet.</div>
+                  <button onClick={() => setStarted(true)}>Start driving</button>
                 )}
+                {joinedRoomCode && currentRoom && !started && currentRoom.status === 'waiting' ? (
+                  <div className="room-waiting">
+                    Waiting for another player to join room <strong>{joinedRoomCode}</strong>...
+                    <button className="leave-room" onClick={leaveRoom}>Leave</button>
+                  </div>
+                ) : null}
+                {currentRoom && currentRoom.status === 'finished' ? (
+                  <div className="room-finished">
+                    <div>{currentRoom.winners?.length ? `${currentRoom.winners.join(' & ')} won` : 'Round finished'}</div>
+                    {isRoomHost ? (
+                      <button className="cloud-button" onClick={restartRoom}>Restart round</button>
+                    ) : null}
+                    <button className="leave-room" onClick={closeRoom}>Leave room</button>
+                  </div>
+                ) : null}
+                {MODE_CONFIG[mode]?.roomBased && !joinedRoomCode ? (
+                  <div className="room-list">
+                    <div className="room-list-title">Available rooms</div>
+                    {rooms.filter((room) => room.mode === mode && room.status !== 'closed').length ? (
+                      rooms
+                        .filter((room) => room.mode === mode && room.status !== 'closed')
+                        .map((room) => (
+                          <div key={room.code} className="room-item">
+                            <div>
+                              <strong>{room.code}</strong> · {room.players.length}/{room.maxPlayers}
+                            </div>
+                            <button onClick={() => { setRoomCode(room.code); joinRoom(room.code) }}>Join</button>
+                          </div>
+                        ))
+                    ) : (
+                      <div className="room-empty">No rooms available yet.</div>
+                    )}
+                  </div>
+                ) : null}
+                <label>Options</label>
+                <div className="center-toggle">
+                  <label>
+                    <input type="checkbox" checked={showStreetNames} onChange={(e) => setShowStreetNames(e.target.checked)} /> Street names
+                  </label>
+                </div>
+                <button className="cloud-button" onClick={addCloud} disabled={cloudCooldown}>Add cloud</button>
               </div>
-            ) : null}
+            </div>
           </div>
         ) : null}
         {currentRoom ? (
@@ -1555,17 +1618,23 @@ export default function App({ playerName }) {
             ))}
           </div>
         ) : null}
-        <div className="status-panel">
-          <div className="center-toggle">
-            <label>
-              <input type="checkbox" checked={showStreetNames} onChange={(e) => setShowStreetNames(e.target.checked)} /> Street names
-            </label>
+        {started ? (
+          <div className="status-panel">
+            <div className="center-toggle">
+              <label>
+                <input type="checkbox" checked={showStreetNames} onChange={(e) => setShowStreetNames(e.target.checked)} /> Street names
+              </label>
+            </div>
+            <div className="turbo-hint">Hold Shift for Turbo</div>
+            <button className={`cloud-button${turboButtonOn ? ' turbo-toggle-on' : ''}`} onClick={() => setTurboButtonOn((t) => !t)}>
+              {turboButtonOn ? 'Turbo: ON' : 'Turbo'}
+            </button>
+            <button className="cloud-button" onClick={addCloud} disabled={cloudCooldown}>Add cloud</button>
+            {joinedRoomCode ? (
+              <button className="leave-room" onClick={leaveRoom}>Leave room</button>
+            ) : null}
           </div>
-          <button className="cloud-button" onClick={addCloud} disabled={cloudCooldown}>Add cloud</button>
-          {joinedRoomCode ? (
-            <button className="leave-room" onClick={leaveRoom}>Leave room</button>
-          ) : null}
-        </div>
+        ) : null}
       </div>
       <div className="map-panel">
         <MapView

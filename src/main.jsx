@@ -9,9 +9,9 @@ const container = document.getElementById('root')
 if (container) {
   createRoot(container).render(
     <NameGate>
-      {(name) => (
+      {(name, renameName) => (
         <>
-          <App playerName={name} />
+          <App playerName={name} renameName={renameName} />
           <ChatPanel myName={name} />
         </>
       )}

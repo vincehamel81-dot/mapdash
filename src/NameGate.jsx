@@ -89,6 +89,78 @@ export default function NameGate({ children }) {
     }
   }, [])
 
+  // Renames the claimed player: revalidates + re-checks uniqueness exactly like the initial claim,
+  // then cascades the new name across every table that stores it by convention (no foreign keys in
+  // this schema - see supabase/schema.sql). Deliberately does NOT touch `rooms` - callers are
+  // expected to only allow this while the player isn't in an active room, since room state has
+  // several scattered name references (host, Tag's itName, Finder-Keeper's foundBy) that a rename
+  // could easily leave inconsistent mid-round.
+  const renameName = useCallback(async (raw) => {
+    const displayName = raw.trim()
+    if (!isValidName(displayName)) {
+      return { success: false, error: 'Name must be 2-20 characters.' }
+    }
+    const nameLower = displayName.toLowerCase()
+    const oldLower = claimedName.toLowerCase()
+    if (nameLower === oldLower) {
+      // Same name (possibly different casing/whitespace) - just normalize display locally.
+      sessionStorage.setItem(SESSION_KEY, displayName)
+      setClaimedName(displayName)
+      return { success: true }
+    }
+
+    if (!isSupabaseConfigured) {
+      sessionStorage.setItem(SESSION_KEY, displayName)
+      setClaimedName(displayName)
+      return { success: true }
+    }
+
+    try {
+      const { data: existing, error: fetchError } = await supabase
+        .from('online_players')
+        .select('last_seen')
+        .eq('name_lower', nameLower)
+        .maybeSingle()
+      if (fetchError) throw fetchError
+      if (existing) {
+        const age = Date.now() - new Date(existing.last_seen).getTime()
+        if (age < STALE_AFTER_MS) {
+          return { success: false, error: 'Name is already in use.' }
+        }
+      }
+
+      const { error: playerError } = await supabase
+        .from('online_players')
+        .update({ name_lower: nameLower, display_name: displayName })
+        .eq('name_lower', oldLower)
+      if (playerError) throw playerError
+
+      const { error: followerError } = await supabase
+        .from('friends')
+        .update({ follower_name_lower: nameLower })
+        .eq('follower_name_lower', oldLower)
+      if (followerError) throw followerError
+
+      const { error: followedError } = await supabase
+        .from('friends')
+        .update({ followed_name_lower: nameLower, followed_display_name: displayName })
+        .eq('followed_name_lower', oldLower)
+      if (followedError) throw followedError
+
+      const { error: messagesError } = await supabase
+        .from('messages')
+        .update({ sender_name_lower: nameLower, sender_display_name: displayName })
+        .eq('sender_name_lower', oldLower)
+      if (messagesError) throw messagesError
+
+      sessionStorage.setItem(SESSION_KEY, displayName)
+      setClaimedName(displayName)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: 'Could not rename right now. Try again.' }
+    }
+  }, [claimedName])
+
   if (!claimedName) {
     return (
       <div className="name-gate">
@@ -116,5 +188,5 @@ export default function NameGate({ children }) {
     )
   }
 
-  return children(claimedName)
+  return children(claimedName, renameName)
 }
