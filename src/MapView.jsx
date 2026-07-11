@@ -29,6 +29,13 @@ export default function MapView({ tileUrls, attribution, center, zoom, onReady, 
       dragRotate: false,
       touchZoomRotate: false,
       pitchWithRotate: false,
+      // MapLibre's own Shift+Arrow rotate/pitch and arrow-key pan handling was still active here
+      // (only drag/touch rotation was disabled above) - it binds its own keydown listener
+      // directly on the map canvas, so it fired independently of/alongside the game's custom
+      // controls whenever Shift was combined with an arrow key, fighting the bearing this app
+      // already drives imperatively every frame. Fully disabled since the game has its own
+      // complete keyboard scheme.
+      keyboard: false,
       attributionControl: { compact: true }
     })
     mapRef.current = map

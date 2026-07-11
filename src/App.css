@@ -464,6 +464,7 @@
 
 .center-toggle { display:flex; align-items:center; gap:8px; font-size:0.9rem }
 .center-toggle input { transform: scale(1.1) }
+.center-toggle label { display: flex; align-items: center; gap: 6px; white-space: nowrap }
 
 .player-dot {
   position: absolute;

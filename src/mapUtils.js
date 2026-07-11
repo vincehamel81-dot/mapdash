@@ -221,11 +221,12 @@ function splitPolylineAtDistances(polyline, sortedDistances) {
 // runs first (see buildGraph) so anything it creates participates correctly in those two passes.
 //
 // No elevation data exists anywhere in the source data, so there's no way to distinguish a real
-// at-grade intersection from a highway overpass crossing a street below it - autoroute-named
-// segments (the same /autoroute|aut\b/ convention assignSegmentSpeed already uses) are excluded
-// from this pass entirely as a pragmatic guard against inventing a phantom turn onto/off a
-// highway. Not perfect (a real highway on/off-ramp interchange would also be skipped), but
-// there's no reliable signal available to do better without real elevation data.
+// at-grade intersection from a highway overpass crossing a street below it - a highway-crosses-
+// highway pair (the same /autoroute|aut\b/ convention assignSegmentSpeed already uses to identify
+// them) is excluded as a pragmatic guard against inventing a phantom turn between two stacked
+// highways, almost certainly grade-separated. A highway crossing anything else (a ramp, a local
+// street) is NOT excluded - that's very often a genuine at-grade merge/interchange connection,
+// and on/off-ramps frequently cross the mainline's polyline without sharing an endpoint.
 const CROSSING_GRID_CELL_METERS = 40
 
 function isHighwaySegment(edge) {
@@ -250,14 +251,20 @@ function segmentIntersection(p1, p2, p3, p4) {
 }
 
 function splitCrossingEdges(rawNodes, edges) {
-  const edgeList = Array.from(edges.values()).filter((e) => !isHighwaySegment(e))
+  // Highway segments still participate here - only a highway-crosses-highway pair is skipped
+  // below (almost certainly a grade-separated stack interchange, not a real connection). A
+  // highway crossing a ramp or local street is very often a genuine at-grade merge/interchange
+  // connection - excluding those entirely was the actual cause of "can't get on/off the
+  // highway" reports, since on/off-ramps frequently cross the mainline's polyline without
+  // sharing an endpoint.
+  const edgeList = Array.from(edges.values())
   if (!edgeList.length) return
   const refLat = edgeList[0].polyline[0][0]
   const cellSize = CROSSING_GRID_CELL_METERS
 
-  // Flatten every (non-highway) edge into its individual line-pieces (consecutive vertex pairs),
-  // bucketed by both endpoints' grid cells - same 40m-cell approach as buildVertexGrid above, just
-  // indexing pieces instead of whole polylines' vertices.
+  // Flatten every edge into its individual line-pieces (consecutive vertex pairs), bucketed by
+  // both endpoints' grid cells - same 40m-cell approach as buildVertexGrid above, just indexing
+  // pieces instead of whole polylines' vertices.
   const pieces = []
   const grid = new Map()
   for (const edge of edgeList) {
@@ -295,6 +302,7 @@ function splitCrossingEdges(rawNodes, edges) {
           const pairKey = piece.index < other.index ? `${piece.index}#${other.index}` : `${other.index}#${piece.index}`
           if (seenPairs.has(pairKey)) continue
           seenPairs.add(pairKey)
+          if (isHighwaySegment(piece.edge) && isHighwaySegment(other.edge)) continue
 
           // Project all four points relative to piece.a - any shared reference point works, this
           // one's just convenient since it's already at hand.

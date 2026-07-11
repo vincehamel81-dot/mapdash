@@ -346,6 +346,23 @@ export default function App({ playerName, renameName }) {
         'fill-outline-color': 'rgba(90,110,135,0.55)'
       }
     })
+    // A static outline of the playable area (CONFIG.bbox, which street data is filtered to) - the
+    // boundary itself isn't driveable-past-blocked, but it's now genuinely the edge of the street
+    // network, so seeing it coming is the whole point.
+    const { south, west, north, east } = CONFIG.bbox
+    map.addSource('bbox-boundary', {
+      type: 'geojson',
+      data: {
+        type: 'Feature',
+        geometry: { type: 'LineString', coordinates: [[west, south], [east, south], [east, north], [west, north], [west, south]] }
+      }
+    })
+    map.addLayer({
+      id: 'bbox-boundary',
+      type: 'line',
+      source: 'bbox-boundary',
+      paint: { 'line-color': '#e53935', 'line-width': 3, 'line-dasharray': [2, 2], 'line-opacity': 0.85 }
+    })
     setMapReady(true)
   }, [])
 
@@ -713,7 +730,13 @@ export default function App({ playerName, renameName }) {
     fetch('/data/QBC/segments.json')
       .then((res) => res.json())
       .then((data) => {
-        setSegments(data)
+        // The raw file covers a much wider region (Lévis across the river, plus ~50 smaller
+        // outlying municipalities that geographically interleave with Quebec City's own bounds -
+        // a plain bbox-containment filter still let ~1800 Lévis segments through) than the
+        // playable area. Filtering by the source data's own `city` field is precise regardless of
+        // geographic overlap; CONFIG.bbox is derived from exactly this same data's extent, so the
+        // visible boundary drawn on the map still matches it closely.
+        setSegments(data.filter((s) => s.city === 'Québec'))
       })
       .catch(() => {
         console.error('Unable to load street data')
