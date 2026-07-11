@@ -1,16 +1,14 @@
 export const CONFIG = {
-  // Quebec City proper only (all 6 real arrondissements - Les Rivières, La Cité-Limoilou,
-  // Sainte-Foy-Sillery-Cap-Rouge, La Haute-Saint-Charles, Charlesbourg, Beauport), not the much
-  // wider ~60km region the raw data also includes (Lévis across the river, plus ~50 smaller
-  // outlying municipalities like Donnacona/Neuville/Château-Richer/Île d'Orléans towns that
-  // were never really "the game," just along for the ride in the source file). Derived directly
-  // from the actual extent of `city === 'Québec'` segments (10,914 of them) with a small margin,
-  // not a hand-picked guess - segments.json is filtered to this box at load time (see App.jsx).
+  // Half the area of the box that just replaced the original ~60km-wide region (itself derived
+  // from `city === 'Québec'` segments' full extent - see git history for that math), shrunk
+  // toward the same center per direct user feedback that even "Quebec City proper" was still too
+  // big. Some real Quebec City streets near the old edges now fall outside this and are filtered
+  // out (see App.jsx) - accepted tradeoff, not a bug.
   bbox: {
-    south: 46.730,
-    west: -71.545,
-    north: 46.978,
-    east: -71.135
+    south: 46.7663,
+    west: -71.4850,
+    north: 46.9417,
+    east: -71.1950
   },
   defaultZoom: 15,
   minZoom: 12,

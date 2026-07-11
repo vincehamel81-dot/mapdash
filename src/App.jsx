@@ -130,13 +130,15 @@ function seededRandom(seedStr) {
 // zoom-expression math needed at all, unlike the circle-radius approach this replaces.
 function cloudPolygonCoords(cloud) {
   const rand = seededRandom(cloud.id)
-  // More vertices + tighter jitter/radius variance than a minimal blob reads as a soft, rounded
-  // shape instead of a jagged/pointy polygon.
-  const vertexCount = 18 + Math.floor(rand() * 6)
+  // High vertex count + minimal jitter/radius variance reads as a smooth, soft, rounded shape -
+  // this is purely visual (collision is a separate, simple radius check against cloud.radiusMeters
+  // in the tick loop, never the polygon's exact vertices), so there's no accuracy tradeoff in
+  // making this as round as looks good.
+  const vertexCount = 48 + Math.floor(rand() * 10)
   const points = []
   for (let i = 0; i < vertexCount; i++) {
-    const angle = (360 * i) / vertexCount + (rand() - 0.5) * 6
-    const radiusFactor = 0.82 + rand() * 0.3
+    const angle = (360 * i) / vertexCount + (rand() - 0.5) * 2
+    const radiusFactor = 0.94 + rand() * 0.1
     const [lat, lng] = offsetLatLng([cloud.lat, cloud.lng], angle, cloud.radiusMeters * radiusFactor)
     points.push([lng, lat])
   }
@@ -296,6 +298,8 @@ export default function App({ playerName, renameName }) {
   const [turnPreference, setTurnPreference] = useState('straight')
   const [nextTurnSignal, setNextTurnSignal] = useState('straight')
   const turnPreferenceRef = useRef('straight')
+  // eslint-disable-next-line no-unused-vars
+  const [mapViewTick, setMapViewTick] = useState(0)
   const [clouds, setClouds] = useState([])
   const [wind, setWind] = useState({ direction: 'NE', speed: 20, angle: CARDINAL_ANGLES.NE })
   const [roomCode, setRoomCode] = useState('')
@@ -328,6 +332,12 @@ export default function App({ playerName, renameName }) {
 
   const handleMapReady = useCallback((map) => {
     mapRef.current = map
+    // screenPlayers/screenItems project lat/lng to screen % using the map's CURRENT
+    // center/zoom/bearing at compute time - without this, panning or zooming the map (a plain
+    // MapLibre-internal transform, not React state) left those projections stale until something
+    // else happened to trigger a re-render, which is exactly why item/player markers used to
+    // visibly drift or vanish while panning/zooming instead of tracking the map.
+    map.on('move', () => setMapViewTick((t) => t + 1))
     map.addSource('route', { type: 'geojson', data: polylineToGeoJSON([]) })
     map.addLayer({
       id: 'route',
@@ -566,6 +576,16 @@ export default function App({ playerName, renameName }) {
   const movementRef = useRef({ distanceAlong: 0, direction: 1 })
   const animationRef = useRef(null)
   const pendingTurnRef = useRef(null)
+  // Always holds the freshest leaveRoom (synced by an effect right after it's declared below) -
+  // quitGame calls through this instead of leaveRoom directly, since a real bug was traced to
+  // exactly this staleness: quitGame's own deps deliberately exclude leaveRoom (it's declared
+  // later in this component, so listing it would throw "Cannot access before initialization" on
+  // first render), which meant quitGame could call a stale leaveRoom closure holding a `rooms`
+  // snapshot from before a 2nd player had even joined - it saw an "empty" room and deleted it
+  // outright instead of reassigning host, which is what silently vanished a room out from under
+  // a remaining player. This ref indirection keeps quitGame safe to create early (no TDZ crash)
+  // while still always invoking the current leaveRoom.
+  const leaveRoomRef = useRef(null)
 
   const currentSegment = useMemo(() => graph?.edges.get(currentEdgeId) || null, [graph, currentEdgeId])
   const displayedSpeed = useMemo(() => {
@@ -630,12 +650,12 @@ export default function App({ playerName, renameName }) {
 
   const quitGame = useCallback(() => {
     // Quitting out of a room needs the same cleanup as clicking "Leave room" - just clearing
-    // joinedRoomCode locally left the player as a ghost member other clients still saw.
-    // leaveRoom is intentionally not in the deps array below: it's declared later in this
-    // component, so referencing it there (evaluated eagerly, unlike a callback body) would throw
-    // "Cannot access before initialization" on first render.
+    // joinedRoomCode locally left the player as a ghost member other clients still saw. Goes
+    // through leaveRoomRef (see its declaration above) rather than calling leaveRoom directly -
+    // that's the fix for a real bug where a stale closure caused the room to be deleted instead
+    // of just losing the departing host.
     if (joinedRoomCode) {
-      leaveRoom()
+      leaveRoomRef.current?.()
     } else {
       setStarted(false)
     }
@@ -732,11 +752,14 @@ export default function App({ playerName, renameName }) {
       .then((data) => {
         // The raw file covers a much wider region (Lévis across the river, plus ~50 smaller
         // outlying municipalities that geographically interleave with Quebec City's own bounds -
-        // a plain bbox-containment filter still let ~1800 Lévis segments through) than the
-        // playable area. Filtering by the source data's own `city` field is precise regardless of
-        // geographic overlap; CONFIG.bbox is derived from exactly this same data's extent, so the
-        // visible boundary drawn on the map still matches it closely.
-        setSegments(data.filter((s) => s.city === 'Québec'))
+        // a plain bbox-containment filter alone still let ~1800 Lévis segments through) than the
+        // playable area, so first restrict to the source data's own `city` field (precise
+        // regardless of geographic overlap), then further restrict to CONFIG.bbox (now
+        // deliberately smaller than all of Quebec City proper, per feedback that even that felt
+        // too big) so what's actually loaded exactly matches the visible boundary on the map.
+        const { south, west, north, east } = CONFIG.bbox
+        const withinBbox = (poly) => poly.every(([lat, lng]) => lat >= south && lat <= north && lng >= west && lng <= east)
+        setSegments(data.filter((s) => s.city === 'Québec' && withinBbox(s.polyline)))
       })
       .catch(() => {
         console.error('Unable to load street data')
@@ -1155,9 +1178,13 @@ export default function App({ playerName, renameName }) {
     (players, roomMode) => {
       const { players: nextPlayers, itName } = resetPlayersForRound(players, roomMode)
       const isFinder = roomMode === 'finder-easy' || roomMode === 'finder-hard'
+      // Bias items toward wherever the round is actually starting instead of anywhere in the
+      // whole playable bbox - otherwise items landed scattered across the whole map regardless of
+      // where anyone actually is, which read as "half of these are unreachable."
+      const anchor = positionRef.current || pickedSpawn || CONFIG.startPosition
       const items = isFinder && graph
         ? FINDER_ITEM_ICON_IDS.map((iconId, i) => {
-            const pt = pickRandomStreetPoint(graph) || defaultPosition
+            const pt = pickRandomStreetPoint(graph, { near: [anchor.lat, anchor.lng], maxDistanceMeters: 2500 }) || defaultPosition
             return { id: `item-${i}-${crypto.randomUUID()}`, iconId, lat: pt.lat, lng: pt.lng, foundBy: null }
           })
         : []
@@ -1315,6 +1342,10 @@ export default function App({ playerName, renameName }) {
     setStarted(false)
   }, [joinedRoomCode, name, rooms, setRooms])
 
+  useEffect(() => {
+    leaveRoomRef.current = leaveRoom
+  }, [leaveRoom])
+
   const createRoom = useCallback(() => {
     const sanitizedName = name.trim() || 'Player'
     const code = roomCode.trim().toUpperCase() || generateRoomCode()
@@ -1435,7 +1466,10 @@ export default function App({ playerName, renameName }) {
     } catch {
       return []
     }
-  }, [currentRoom, name, livePositions])
+    // mapViewTick has no value of its own - it exists purely to re-run this on every map
+    // move/zoom/pan, not just when the underlying room/player data changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentRoom, name, livePositions, mapViewTick])
 
   // Survival's old "touch a cloud = instant out" collision check lived here; it's replaced by the
   // continuous health damage/regen loop in the movement tick effect below, which also drives the
@@ -1460,7 +1494,8 @@ export default function App({ playerName, renameName }) {
     } catch {
       return []
     }
-  }, [currentRoom, currentPlayer])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentRoom, currentPlayer, mapViewTick])
 
   const itemDistances = useMemo(() => {
     if (!currentRoom || !(currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard')) return []

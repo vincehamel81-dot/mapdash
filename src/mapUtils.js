@@ -680,7 +680,13 @@ export function chooseNextSegment(graph, nodeKey, currentEdge, currentHeadingDeg
     const otherKey = edge.startKey === nodeKey ? edge.endKey : edge.startKey
     const otherNode = graph.nodes.get(otherKey)
     if (!otherNode) continue
-    const candidateAngle = headingAngle(node.coord, otherNode.coord)
+    // The candidate's angle must be its LOCAL departure heading from this node, not a straight
+    // line to its far endpoint - for anything longer than a short straight urban block (a curving
+    // ramp, a bridge, a highway segment that bends over its length), those two can differ a lot,
+    // which is exactly what made the "smallest turn" heuristic below pick a genuinely curving
+    // option over a road that actually continues straight, or vice versa.
+    const enteringAtStart = edge.startKey === nodeKey
+    const candidateAngle = getLocalHeadingAtDistance(edge, enteringAtStart ? 0 : edge.lengthMeters, enteringAtStart ? 1 : -1)
     const angleDelta = signedAngleBetween(currentHeadingDeg, candidateAngle)
     choices.push({ edge, angleDelta, absAngle: Math.abs(angleDelta) })
   }
@@ -755,11 +761,20 @@ export function getSegmentPosition(segment, distanceAlong) {
 }
 
 // Picks a uniformly-random point somewhere along the street graph - used to place Finder-Keeper
-// items. No bbox filtering needed: the graph is already built solely from segments.json, which is
-// itself scoped to CONFIG.bbox.
-export function pickRandomStreetPoint(graph) {
-  const edges = Array.from(graph.edges.values()).filter((e) => e.lengthMeters > 0)
+// items. With `near`/`maxDistanceMeters`, first restricts to edges with at least one endpoint
+// within that radius (a rough but cheap proximity filter, not exact edge-to-point distance) -
+// without this, items landed anywhere across the whole playable bbox regardless of where the
+// round actually starts, which is what made them feel scattered/unreachable. Falls back to the
+// unrestricted pool if too few edges qualify (e.g. a tiny radius near the edge of the map).
+export function pickRandomStreetPoint(graph, { near, maxDistanceMeters } = {}) {
+  let edges = Array.from(graph.edges.values()).filter((e) => e.lengthMeters > 0)
   if (!edges.length) return null
+  if (near && maxDistanceMeters) {
+    const nearby = edges.filter(
+      (e) => haversine(near, e.polyline[0]) <= maxDistanceMeters || haversine(near, e.polyline[e.polyline.length - 1]) <= maxDistanceMeters
+    )
+    if (nearby.length >= 10) edges = nearby
+  }
   const edge = edges[Math.floor(Math.random() * edges.length)]
   const distanceAlong = Math.random() * edge.lengthMeters
   const [lat, lng] = getSegmentPosition(edge, distanceAlong)
