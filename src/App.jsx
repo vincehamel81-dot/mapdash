@@ -690,7 +690,13 @@ export default function App({ playerName, renameName, joinRequest }) {
   // other way to know that, since rooms/online_players are otherwise unrelated tables.
   useEffect(() => {
     if (!isSupabaseConfigured) return
-    supabase.from('online_players').update({ room_code: joinedRoomCode || null }).eq('name_lower', name.toLowerCase())
+    supabase
+      .from('online_players')
+      .update({ room_code: joinedRoomCode || null })
+      .eq('name_lower', name.toLowerCase())
+      .then(({ error }) => {
+        if (error) console.error('Failed to sync room_code:', error.message)
+      })
   }, [joinedRoomCode, name])
 
   useEffect(() => {
