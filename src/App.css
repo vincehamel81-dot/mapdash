@@ -362,6 +362,31 @@
   height: 100%;
 }
 
+.car-marker-signal {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #ffb400;
+  font-size: 1.2rem;
+  font-weight: 900;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.5);
+  animation: turn-signal-blink 0.6s steps(1, start) infinite;
+}
+
+.car-marker-signal-left {
+  right: 100%;
+  margin-right: 2px;
+}
+
+.car-marker-signal-right {
+  left: 100%;
+  margin-left: 2px;
+}
+
+@keyframes turn-signal-blink {
+  50% { opacity: 0; }
+}
+
 .car-marker-label {
   position: absolute;
   bottom: 100%;

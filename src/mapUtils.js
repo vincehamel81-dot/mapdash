@@ -214,6 +214,163 @@ function splitPolylineAtDistances(polyline, sortedDistances) {
   return pieces
 }
 
+// Detects TRUE mid-polyline crossings - two streets whose polylines cross where NEITHER one ends,
+// like a real X-intersection - and splits both crossing edges there, wiring in a shared node so
+// the graph gains a real, navigable intersection. This is distinct from mergeNearbyNodes'
+// endpoint-to-endpoint case and snapDanglingEndpoints' dead-end-touches-an-interior case above;
+// runs first (see buildGraph) so anything it creates participates correctly in those two passes.
+//
+// No elevation data exists anywhere in the source data, so there's no way to distinguish a real
+// at-grade intersection from a highway overpass crossing a street below it - autoroute-named
+// segments (the same /autoroute|aut\b/ convention assignSegmentSpeed already uses) are excluded
+// from this pass entirely as a pragmatic guard against inventing a phantom turn onto/off a
+// highway. Not perfect (a real highway on/off-ramp interchange would also be skipped), but
+// there's no reliable signal available to do better without real elevation data.
+const CROSSING_GRID_CELL_METERS = 40
+
+function isHighwaySegment(edge) {
+  return /autoroute|aut\b/.test((edge.name || '').toLowerCase())
+}
+
+// Standard parametric line-segment intersection test in a shared local meter-space (see
+// localXY). p1/p2 describe one segment, p3/p4 the other. Returns the parametric position along
+// each (t for p1->p2, u for p3->p4) if they truly cross in both segments' interiors, or null for
+// parallel/non-crossing/endpoint-touching pairs - endpoint touches are deliberately excluded here
+// since mergeNearbyNodes/snapDanglingEndpoints already own that case.
+function segmentIntersection(p1, p2, p3, p4) {
+  const d1x = p2.x - p1.x, d1y = p2.y - p1.y
+  const d2x = p4.x - p3.x, d2y = p4.y - p3.y
+  const denom = d1x * d2y - d1y * d2x
+  if (Math.abs(denom) < 1e-9) return null
+  const dx = p3.x - p1.x, dy = p3.y - p1.y
+  const t = (dx * d2y - dy * d2x) / denom
+  const u = (dx * d1y - dy * d1x) / denom
+  if (t <= 1e-6 || t >= 1 - 1e-6 || u <= 1e-6 || u >= 1 - 1e-6) return null
+  return { t, u }
+}
+
+function splitCrossingEdges(rawNodes, edges) {
+  const edgeList = Array.from(edges.values()).filter((e) => !isHighwaySegment(e))
+  if (!edgeList.length) return
+  const refLat = edgeList[0].polyline[0][0]
+  const cellSize = CROSSING_GRID_CELL_METERS
+
+  // Flatten every (non-highway) edge into its individual line-pieces (consecutive vertex pairs),
+  // bucketed by both endpoints' grid cells - same 40m-cell approach as buildVertexGrid above, just
+  // indexing pieces instead of whole polylines' vertices.
+  const pieces = []
+  const grid = new Map()
+  for (const edge of edgeList) {
+    let accumulated = 0
+    for (let i = 1; i < edge.polyline.length; i++) {
+      const a = edge.polyline[i - 1]
+      const b = edge.polyline[i]
+      const piece = { index: pieces.length, edge, a, b, segStart: accumulated }
+      pieces.push(piece)
+      const [cxA, cyA] = gridCellCoords(a, refLat, cellSize)
+      const [cxB, cyB] = gridCellCoords(b, refLat, cellSize)
+      const keyA = `${cxA}|${cyA}`
+      if (!grid.has(keyA)) grid.set(keyA, [])
+      grid.get(keyA).push(piece)
+      if (cxA !== cxB || cyA !== cyB) {
+        const keyB = `${cxB}|${cyB}`
+        if (!grid.has(keyB)) grid.set(keyB, [])
+        grid.get(keyB).push(piece)
+      }
+      accumulated += haversine(a, b)
+    }
+  }
+
+  const cutsByEdge = new Map() // edgeId -> [{ distanceAlong, nodeKey }]
+  const seenPairs = new Set()
+
+  for (const piece of pieces) {
+    const [cx, cy] = gridCellCoords(piece.a, refLat, cellSize)
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const bucket = grid.get(`${cx + dx}|${cy + dy}`)
+        if (!bucket) continue
+        for (const other of bucket) {
+          if (other.edge.id === piece.edge.id || other.index === piece.index) continue
+          const pairKey = piece.index < other.index ? `${piece.index}#${other.index}` : `${other.index}#${piece.index}`
+          if (seenPairs.has(pairKey)) continue
+          seenPairs.add(pairKey)
+
+          // Project all four points relative to piece.a - any shared reference point works, this
+          // one's just convenient since it's already at hand.
+          const [refPtLat, refPtLng] = piece.a
+          const p1 = { x: 0, y: 0 }
+          const p2 = localXY(piece.b, refPtLat, refPtLng)
+          const p3 = localXY(other.a, refPtLat, refPtLng)
+          const p4 = localXY(other.b, refPtLat, refPtLng)
+          const hit = segmentIntersection(p1, p2, p3, p4)
+          if (!hit) continue
+
+          const distA = piece.segStart + hit.t * haversine(piece.a, piece.b)
+          const distB = other.segStart + hit.u * haversine(other.a, other.b)
+          const crossPoint = [piece.a[0] + hit.t * (piece.b[0] - piece.a[0]), piece.a[1] + hit.t * (piece.b[1] - piece.a[1])]
+          const nodeKey = roundCoord(crossPoint)
+
+          if (!cutsByEdge.has(piece.edge.id)) cutsByEdge.set(piece.edge.id, [])
+          cutsByEdge.get(piece.edge.id).push({ distanceAlong: distA, nodeKey })
+          if (!cutsByEdge.has(other.edge.id)) cutsByEdge.set(other.edge.id, [])
+          cutsByEdge.get(other.edge.id).push({ distanceAlong: distB, nodeKey })
+        }
+      }
+    }
+  }
+
+  // Apply the collected cuts - same split-and-rewire shape as snapDanglingEndpoints' cutsByEdge
+  // loop below, just keyed by a precomputed crossing-point node instead of a dangling endpoint.
+  for (const [edgeId, rawCuts] of cutsByEdge) {
+    const edge = edges.get(edgeId)
+    if (!edge) continue
+
+    const sorted = rawCuts.slice().sort((a, b) => a.distanceAlong - b.distanceAlong)
+    const dedupedCuts = []
+    for (const cut of sorted) {
+      const last = dedupedCuts[dedupedCuts.length - 1]
+      if (last && Math.abs(cut.distanceAlong - last.distanceAlong) < 1) continue
+      if (cut.distanceAlong <= 1 || cut.distanceAlong >= edge.lengthMeters - 1) continue
+      dedupedCuts.push(cut)
+    }
+    if (!dedupedCuts.length) continue
+
+    const pieces2 = splitPolylineAtDistances(edge.polyline, dedupedCuts.map((c) => c.distanceAlong))
+    if (pieces2.length < 2) continue
+
+    edges.delete(edgeId)
+    const newEdges = pieces2.map((piece, i) => packageSegment({ ...edge, id: `${edgeId}~x${i}`, polyline: piece }))
+    newEdges[0].startKey = edge.startKey
+    newEdges[newEdges.length - 1].endKey = edge.endKey
+    dedupedCuts.forEach((cut, i) => {
+      newEdges[i].endKey = cut.nodeKey
+      newEdges[i + 1].startKey = cut.nodeKey
+    })
+    newEdges.forEach((e) => edges.set(e.id, e))
+
+    const startNode = rawNodes.get(edge.startKey)
+    const endNode = rawNodes.get(edge.endKey)
+    if (startNode) {
+      const idx = startNode.edges.indexOf(edge)
+      if (idx !== -1) startNode.edges[idx] = newEdges[0]
+    }
+    if (endNode) {
+      const idx = endNode.edges.indexOf(edge)
+      if (idx !== -1) endNode.edges[idx] = newEdges[newEdges.length - 1]
+    }
+
+    dedupedCuts.forEach((cut, i) => {
+      if (!rawNodes.has(cut.nodeKey)) {
+        rawNodes.set(cut.nodeKey, { key: cut.nodeKey, coord: newEdges[i].polyline[newEdges[i].polyline.length - 1], edges: [] })
+      }
+      const node = rawNodes.get(cut.nodeKey)
+      if (!node.edges.includes(newEdges[i])) node.edges.push(newEdges[i])
+      if (!node.edges.includes(newEdges[i + 1])) node.edges.push(newEdges[i + 1])
+    })
+  }
+}
+
 function snapDanglingEndpoints(rawNodes, edges, toleranceMeters) {
   const edgeList = Array.from(edges.values())
   if (!edgeList.length) return
@@ -378,6 +535,7 @@ export function buildGraph(segments, {
     endNode.edges.push(edge)
   }
 
+  splitCrossingEdges(rawNodes, edges)
   snapDanglingEndpoints(rawNodes, edges, dangleToleranceMeters)
 
   const nodes = mergeNearbyNodes(rawNodes, toleranceMeters)

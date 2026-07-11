@@ -90,11 +90,16 @@ function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 }
 
-function carMarkerMarkup(avatarId, color, label) {
+function carMarkerMarkup(avatarId, color, label, turnSignal) {
   const safeLabel = escapeHtml(label || '')
   // Every avatar (the default arrow included) recolors via currentColor, so this wrapper is the
   // only place that needs to know the chosen color - the SVG markup itself is never rewritten.
-  return `${safeLabel ? `<div class="car-marker-label">${safeLabel}</div>` : ''}<div class="car-marker-glyph" style="color:${color}">${getAvatarSvg(avatarId)}</div>`
+  // The marker never rotates with heading (rotationAlignment: 'viewport' at creation), so
+  // "signaling left/right" is always simple screen-left/screen-right - no compass math needed.
+  const signalHtml = turnSignal === 'left' || turnSignal === 'right'
+    ? `<div class="car-marker-signal car-marker-signal-${turnSignal}">${turnSignal === 'left' ? '◀' : '▶'}</div>`
+    : ''
+  return `${safeLabel ? `<div class="car-marker-label">${safeLabel}</div>` : ''}<div class="car-marker-glyph" style="color:${color}">${getAvatarSvg(avatarId)}</div>${signalHtml}`
 }
 
 function polylineToGeoJSON(polyline) {
@@ -164,12 +169,15 @@ const defaultPosition = {
   speed: 0
 }
 
-function useDrivingControls(started, onControlsChange, onZoomChange) {
+function useDrivingControls(started, onControlsChange, onZoomChange, onReverseTap) {
   useEffect(() => {
     if (!started) return
 
-    const pressed = { forward: false, reverse: false, left: false, right: false, turbo: false }
-    const update = () => onControlsChange({ ...pressed })
+    // reverseKeyDown is purely internal edge-detection (so holding S doesn't repeat-fire the
+    // flip on the browser's keydown auto-repeat) - it's never exposed via onControlsChange, since
+    // S/ArrowDown is a one-shot action now, not a held control.
+    const pressed = { forward: false, left: false, right: false, turbo: false, reverseKeyDown: false }
+    const update = () => onControlsChange({ forward: pressed.forward, left: pressed.left, right: pressed.right, turbo: pressed.turbo })
 
     const down = (e) => {
       const key = e.key
@@ -183,9 +191,9 @@ function useDrivingControls(started, onControlsChange, onZoomChange) {
         }
       }
       if (key === 'ArrowDown' || key === 's' || key === 'S') {
-        if (!pressed.reverse) {
-          pressed.reverse = true
-          update()
+        if (!pressed.reverseKeyDown) {
+          pressed.reverseKeyDown = true
+          onReverseTap()
         }
       }
       if (key === 'ArrowLeft' || key === 'a' || key === 'A') {
@@ -217,8 +225,7 @@ function useDrivingControls(started, onControlsChange, onZoomChange) {
         update()
       }
       if (key === 'ArrowDown' || key === 's' || key === 'S') {
-        pressed.reverse = false
-        update()
+        pressed.reverseKeyDown = false
       }
       if (key === 'ArrowLeft' || key === 'a' || key === 'A') {
         pressed.left = false
@@ -240,7 +247,7 @@ function useDrivingControls(started, onControlsChange, onZoomChange) {
       window.removeEventListener('keydown', down)
       window.removeEventListener('keyup', up)
     }
-  }, [started, onControlsChange, onZoomChange])
+  }, [started, onControlsChange, onZoomChange, onReverseTap])
 }
 
 function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh, turboActive }) {
@@ -256,7 +263,11 @@ function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh
         </div>
       ) : null}
       {players.map((p) => (
-        <div key={p.name} className={`player-dot ${p.eliminated ? 'eliminated' : ''}`} style={{ left: `${p.screenX}%`, top: `${p.screenY}%`, background: p.color }} title={p.name} />
+        <div key={p.name} className={`player-dot ${p.eliminated ? 'eliminated' : ''}`} style={{ left: `${p.screenX}%`, top: `${p.screenY}%`, background: p.color }} title={p.name}>
+          {p.nextTurn === 'left' || p.nextTurn === 'right' ? (
+            <div className={`car-marker-signal car-marker-signal-${p.nextTurn}`}>{p.nextTurn === 'left' ? '◀' : '▶'}</div>
+          ) : null}
+        </div>
       ))}
       {items.map((item) => (
         <div
@@ -281,8 +292,10 @@ export default function App({ playerName, renameName }) {
   const [activeStreet, setActiveStreet] = useState('Rue inconnue')
   const [activeArrondissement, setActiveArrondissement] = useState('')
   const [activeQuartier, setActiveQuartier] = useState('')
-  const [controls, setControls] = useState({ forward: false, reverse: false, left: false, right: false, turbo: false })
+  const [controls, setControls] = useState({ forward: false, left: false, right: false, turbo: false })
   const [turnPreference, setTurnPreference] = useState('straight')
+  const [nextTurnSignal, setNextTurnSignal] = useState('straight')
+  const turnPreferenceRef = useRef('straight')
   const [clouds, setClouds] = useState([])
   const [wind, setWind] = useState({ direction: 'NE', speed: 20, angle: CARDINAL_ANGLES.NE })
   const [roomCode, setRoomCode] = useState('')
@@ -536,15 +549,14 @@ export default function App({ playerName, renameName }) {
   const movementRef = useRef({ distanceAlong: 0, direction: 1 })
   const animationRef = useRef(null)
   const pendingTurnRef = useRef(null)
-  const reverseHoldStartRef = useRef(null)
 
   const currentSegment = useMemo(() => graph?.edges.get(currentEdgeId) || null, [graph, currentEdgeId])
   const displayedSpeed = useMemo(() => {
-    // Doubled from the street's/reverse's raw value across the board - a 50 km/h street plays at
-    // 100 normal, 200 under Turbo.
-    const base = (controls.forward ? currentSegment?.speedKmh ?? 50 : controls.reverse ? 50 : 0) * 2
-    // Tag's "It" drives 1.5x everyone else's speed - applied uniformly (including the fixed
-    // reverse speed) so there's no exploit in reversing to dodge the buff.
+    // Doubled from the street's raw value across the board - a 50 km/h street plays at 100
+    // normal, 200 under Turbo. S/ArrowDown is an instant facing-flip now (see the tick loop),
+    // not a held reverse gear, so there's no separate reverse speed tier anymore.
+    const base = (controls.forward ? currentSegment?.speedKmh ?? 50 : 0) * 2
+    // Tag's "It" drives 1.5x everyone else's speed.
     const isIt = currentRoom?.mode === 'tag' && currentRoom.itName === name
     if (isIt) return base * 1.5
     // Turbo (hold Shift or the on-screen button): unlimited use, doubles speed in every mode
@@ -553,7 +565,7 @@ export default function App({ playerName, renameName }) {
     return turboActive ? base * 2 : base
   }, [controls, currentSegment, currentRoom, name, turboButtonOn])
 
-  const turboActive = (controls.turbo || turboButtonOn) && (controls.forward || controls.reverse) && currentRoom?.mode !== 'tag'
+  const turboActive = (controls.turbo || turboButtonOn) && controls.forward && currentRoom?.mode !== 'tag'
 
   // Throttled to ~8Hz so cross-device position sync stays well within the realtime message
   // budget - this never touches Supabase's database, only the ephemeral broadcast channel.
@@ -574,11 +586,12 @@ export default function App({ playerName, renameName }) {
           speed: speedVal,
           eliminated,
           health: healthRef.current,
-          foundCount: (currentPlayer?.foundItems || []).length
+          foundCount: (currentPlayer?.foundItems || []).length,
+          nextTurn: nextTurnSignal
         }
       })
     },
-    [joinedRoomCode, name, eliminated, currentPlayer]
+    [joinedRoomCode, name, eliminated, currentPlayer, nextTurnSignal]
   )
 
   const zoomIn = () => setZoom((z) => Math.min(CONFIG.maxZoom, z + 1))
@@ -622,12 +635,24 @@ export default function App({ playerName, renameName }) {
       }
       if (e.key === 'a' || e.key === 'ArrowLeft') {
         pendingTurnRef.current = 'left'
+        setNextTurnSignal('left')
         // clear after 3s
-        window.setTimeout(() => { if (pendingTurnRef.current === 'left') pendingTurnRef.current = null }, 3000)
+        window.setTimeout(() => {
+          if (pendingTurnRef.current === 'left') {
+            pendingTurnRef.current = null
+            setNextTurnSignal(turnPreferenceRef.current)
+          }
+        }, 3000)
       }
       if (e.key === 'd' || e.key === 'ArrowRight') {
         pendingTurnRef.current = 'right'
-        window.setTimeout(() => { if (pendingTurnRef.current === 'right') pendingTurnRef.current = null }, 3000)
+        setNextTurnSignal('right')
+        window.setTimeout(() => {
+          if (pendingTurnRef.current === 'right') {
+            pendingTurnRef.current = null
+            setNextTurnSignal(turnPreferenceRef.current)
+          }
+        }, 3000)
       }
     }
     window.addEventListener('keydown', onKey)
@@ -661,11 +686,28 @@ export default function App({ playerName, renameName }) {
     else setTurnPreference('straight')
   }, [])
 
+  // Turn-signal readout: reflects an explicit tap (pendingTurnRef, set/cleared in the keydown
+  // effect below) if one's active, otherwise falls back to the live steering lean. turnPreference
+  // is mirrored into a ref too since the keydown effect's timeout and the tick loop both need the
+  // freshest value without being recreated every time it changes.
+  useEffect(() => {
+    turnPreferenceRef.current = turnPreference
+    if (!pendingTurnRef.current) setNextTurnSignal(turnPreference)
+  }, [turnPreference])
+
   const handleZoomChange = useCallback((delta) => {
     setZoom((current) => Math.min(CONFIG.maxZoom, Math.max(CONFIG.minZoom, current + delta)))
   }, [])
 
-  useDrivingControls(started, handleControlsChange, handleZoomChange)
+  // S/ArrowDown: instant 180° facing flip in place, replacing the old hold-to-reverse/hold-1s-
+  // for-a-U-turn model (which glitched around its own timing threshold). No animation needed here
+  // - the existing bearing-easing in the tick loop below already turns this instant logical flip
+  // into a smooth visual spin, exactly like it already smooths every other turn.
+  const flipDirection = useCallback(() => {
+    movementRef.current.direction *= -1
+  }, [])
+
+  useDrivingControls(started, handleControlsChange, handleZoomChange, flipDirection)
 
   useEffect(() => {
     fetch('/data/QBC/segments.json')
@@ -729,50 +771,28 @@ export default function App({ playerName, renameName }) {
       if (lastTimeRef.current != null && typeof time === 'number') dt = Math.max(1/120, Math.min(1/30, (time - lastTimeRef.current) / 1000))
       lastTimeRef.current = time
 
-      // Holding reverse for a full second performs an instant U-turn in place instead of
-      // requiring the player to time backing all the way through an intersection perfectly.
-      // Flipping `direction` alone would reverse the car's physical travel direction too (since
-      // it's still combined with the held reverse key below) - it would back up for a second,
-      // then instantly retrace that same ground forward instead of continuing on. Suppressing
-      // reverse's sign flip until the key is released keeps the car moving the same physical way
-      // through the turn, so it reads as "spun around and kept going" rather than a bounce-back.
-      const now = typeof time === 'number' ? time : performance.now()
-      if (controls.reverse) {
-        if (reverseHoldStartRef.current == null) reverseHoldStartRef.current = now
-        else if (now - reverseHoldStartRef.current >= 1000) {
-          movementRef.current.direction *= -1
-          reverseHoldStartRef.current = 'consumed'
-        }
-      } else {
-        reverseHoldStartRef.current = null
-      }
-      const reverseSuppressedByUturn = reverseHoldStartRef.current === 'consumed'
-
       const speedKmh = displayedSpeed
       const metersPerSecond = speedKmh / 3.6
+      // `direction` is which way travel moves distanceAlong along the stored polyline (±1).
+      // S/ArrowDown flips it instantly (see the keydown handler near pendingTurnRef) instead of
+      // reverse being a held gear - so unlike the old model, this is always the car's true
+      // current travel direction, nothing else combines with it per-frame.
       const direction = movementRef.current.direction
-      // `direction` records which way FORWARD (non-reversed) travel moves distanceAlong along
-      // the stored polyline. Reversing flips the ACTUAL direction of travel without changing
-      // that stored value, so every boundary/exit check below must use this combined sign, not
-      // `direction` alone - otherwise reversing back toward distanceAlong=0 is never recognized
-      // as approaching a boundary and the car sticks there forever.
-      const effectiveDirection = direction * (controls.reverse && !reverseSuppressedByUturn ? -1 : 1)
-      const travelDelta = metersPerSecond * dt * effectiveDirection
+      const travelDelta = metersPerSecond * dt * direction
       let nextDistanceAlong = movementRef.current.distanceAlong + travelDelta
       let nextDirection = direction
       let nextEdgeId = currentEdgeId
       let nextSegment = currentSegment
 
-      const overflowing = effectiveDirection === 1
+      const overflowing = direction === 1
         ? nextDistanceAlong > currentSegment.lengthMeters
         : nextDistanceAlong < 0
       if (overflowing) {
-        const remainder = effectiveDirection === 1 ? nextDistanceAlong - currentSegment.lengthMeters : -nextDistanceAlong
-        const exitNodeKey = effectiveDirection === 1 ? currentSegment.endKey : currentSegment.startKey
+        const remainder = direction === 1 ? nextDistanceAlong - currentSegment.lengthMeters : -nextDistanceAlong
+        const exitNodeKey = direction === 1 ? currentSegment.endKey : currentSegment.startKey
         const turnChoice = pendingTurnRef.current || turnPreference
-        const exitDistance = effectiveDirection === 1 ? currentSegment.lengthMeters : 0
-        const baseHeading = getLocalHeadingAtDistance(currentSegment, exitDistance, direction)
-        const currentHeading = normalizeAngle(controls.reverse && !reverseSuppressedByUturn ? baseHeading + 180 : baseHeading)
+        const exitDistance = direction === 1 ? currentSegment.lengthMeters : 0
+        const currentHeading = normalizeAngle(getLocalHeadingAtDistance(currentSegment, exitDistance, direction))
         const nextEdge = chooseNextSegment(
           graph,
           exitNodeKey,
@@ -785,13 +805,14 @@ export default function App({ playerName, renameName }) {
           nextSegment = nextEdge
           const entry = resolveEdgeEntry(nextEdge, exitNodeKey, remainder)
           nextDistanceAlong = entry.distanceAlong
-          // entry.direction is the new edge's effective (continued-travel) direction; convert
-          // back to a forward-travel direction so the invariant above still holds next tick.
-          nextDirection = controls.reverse ? -entry.direction : entry.direction
+          nextDirection = entry.direction
           // consume pending turn if it was used
-          if (pendingTurnRef.current) pendingTurnRef.current = null
+          if (pendingTurnRef.current) {
+            pendingTurnRef.current = null
+            setNextTurnSignal(turnPreferenceRef.current)
+          }
         } else {
-          nextDistanceAlong = effectiveDirection === 1 ? currentSegment.lengthMeters : 0
+          nextDistanceAlong = direction === 1 ? currentSegment.lengthMeters : 0
         }
       }
 
@@ -805,7 +826,7 @@ export default function App({ playerName, renameName }) {
         const posObj = { lat: nextPosition[0], lng: nextPosition[1] }
         setPosition({ lat: posObj.lat, lng: posObj.lng, speed: displayedSpeed })
         const headingBase = getLocalHeadingAtDistance(nextSegment, nextDistanceAlong, nextDirection)
-        const facingMathAngle = normalizeAngle(controls.reverse && !reverseSuppressedByUturn ? headingBase + 180 : headingBase)
+        const facingMathAngle = normalizeAngle(headingBase)
         // Compass bearing (0=N, clockwise) from here on - what the map's `bearing`, the status
         // panel's "Heading" readout, and other players' future directional markers all expect.
         // The turn-choice math above intentionally stays in math-angle convention throughout.
@@ -922,7 +943,7 @@ export default function App({ playerName, renameName }) {
     if (!map || !mapReady || carMarkerRef.current) return
     const el = document.createElement('div')
     el.className = 'car-marker-icon'
-    el.innerHTML = carMarkerMarkup(selectedAvatarId, selectedColor, name)
+    el.innerHTML = carMarkerMarkup(selectedAvatarId, selectedColor, name, nextTurnSignal)
     carMarkerElRef.current = el
     carMarkerRef.current = new maplibregl.Marker({ element: el, rotationAlignment: 'viewport', pitchAlignment: 'viewport' })
       .setLngLat([position.lng, position.lat])
@@ -933,8 +954,8 @@ export default function App({ playerName, renameName }) {
 
   useEffect(() => {
     if (!carMarkerElRef.current) return
-    carMarkerElRef.current.innerHTML = carMarkerMarkup(selectedAvatarId, selectedColor, name)
-  }, [selectedAvatarId, selectedColor, name])
+    carMarkerElRef.current.innerHTML = carMarkerMarkup(selectedAvatarId, selectedColor, name, nextTurnSignal)
+  }, [selectedAvatarId, selectedColor, name, nextTurnSignal])
 
   // A temporary marker preview while choosing a custom start point before driving begins.
   useEffect(() => {
@@ -1383,6 +1404,7 @@ export default function App({ playerName, renameName }) {
             name: p.name,
             color: p.color,
             eliminated: !!p.eliminated,
+            nextTurn: live.nextTurn,
             screenX: (point.x / width) * 100,
             screenY: (point.y / height) * 100
           }
