@@ -1,4 +1,4 @@
-# MapDash
+# MapDashRun
 
 A map-based driving game inspired by gumballquiz with street-based movement, clouds, and multiplayer modes.
 

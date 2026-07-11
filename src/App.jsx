@@ -22,7 +22,7 @@ import {
 } from './mapUtils'
 import './App.css'
 
-const CAR_COLORS = ['#4285F4', '#DB4437', '#F4B400', '#0F9D58', '#9C27B0', '#FF6D00', '#202124', '#FFFFFF']
+const CAR_COLORS = ['#4285F4', '#DB4437', '#F4B400', '#0F9D58', '#9C27B0', '#FF6D00', '#202124']
 const CARDINAL_ANGLES = {
   N: 0,
   NE: 45,
@@ -1441,6 +1441,70 @@ export default function App({ playerName, renameName }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentRoom?.roundStartedAt, currentRoom?.status, currentRoom?.mode, clockTick])
 
+  // Room status/roster/items - shown both inside the pre-drive setup modal (so the host's Start
+  // button is actually reachable while waiting for players, not hidden behind the modal) and in
+  // the normal sidebar position once driving. Built once, referenced in whichever of those two
+  // mutually-exclusive spots applies.
+  const roomMinPlayers = currentRoom ? MODE_CONFIG[currentRoom.mode]?.minPlayers ?? 2 : 2
+  const roomStatusPanels = currentRoom ? (
+    <>
+      <div className="room-meta">
+        <div>Room <strong>{currentRoom.code}</strong></div>
+        <div>Status: <strong>{currentRoom.status}</strong></div>
+        <div>Host: <strong>{currentRoom.host || 'Host'}</strong></div>
+        <div>Players: <strong>{currentRoom.players.length}/{currentRoom.maxPlayers}</strong></div>
+        {roundRemainingLabel ? <div>Time left: <strong>{roundRemainingLabel}</strong></div> : null}
+        {isRoomHost ? (
+          <div className="host-controls">
+            {currentRoom.status !== 'playing' ? (
+              <button className="cloud-button" onClick={startRoom} disabled={currentRoom.players.length < roomMinPlayers}>
+                {currentRoom.players.length < roomMinPlayers ? `Start round (need ${roomMinPlayers}+ players)` : 'Start round'}
+              </button>
+            ) : (
+              <button className="leave-room" onClick={stopRoom}>Stop round</button>
+            )}
+          </div>
+        ) : null}
+      </div>
+      {gameMessage ? <div className="game-message">{gameMessage}</div> : null}
+      <div className="room-player-list">
+        <div className="room-player-title">Players</div>
+        {currentRoom.players.map((player) => {
+          const isSelf = player.name === name
+          const live = livePositions[player.name]
+          return (
+            <div key={player.name} className="room-player-item">
+              <span style={{ color: player.color }}>
+                {player.name}
+                {currentRoom.itName === player.name ? ' (It)' : ''}
+              </span>
+              {currentRoom.mode === 'survival' ? (
+                <span className="player-status active">{Math.round(isSelf ? health : live?.health ?? player.health ?? 1000)} HP</span>
+              ) : currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard' ? (
+                <span className="player-status active">{isSelf ? (player.foundItems || []).length : live?.foundCount ?? 0}/{FINDER_ITEM_ICON_IDS.length}</span>
+              ) : player.eliminated ? (
+                <span className="player-status">Eliminated</span>
+              ) : (
+                <span className="player-status active">Alive</span>
+              )}
+            </div>
+          )
+        })}
+      </div>
+      {currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard' ? (
+        <div className="item-tracker">
+          <div className="room-player-title">Items ({(currentPlayer?.foundItems || []).length}/{FINDER_ITEM_ICON_IDS.length})</div>
+          {itemDistances.map((item) => (
+            <div key={item.id} className={`item-tracker-item${item.found ? ' item-tracker-found' : ''}`}>
+              <span className="item-tracker-icon" style={{ color: selectedColor }} dangerouslySetInnerHTML={{ __html: getAvatarSvg(item.iconId) }} />
+              <span>{item.found ? 'Found!' : `${Math.round(item.distanceMeters)} m`}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </>
+  ) : null
+
   return (
     <div className="app-shell">
       <div className="app-sidebar">
@@ -1552,72 +1616,12 @@ export default function App({ playerName, renameName }) {
                     )}
                   </div>
                 ) : null}
-                <label>Options</label>
-                <div className="center-toggle">
-                  <label>
-                    <input type="checkbox" checked={showStreetNames} onChange={(e) => setShowStreetNames(e.target.checked)} /> Street names
-                  </label>
-                </div>
-                <button className="cloud-button" onClick={addCloud} disabled={cloudCooldown}>Add cloud</button>
+                {roomStatusPanels}
               </div>
             </div>
           </div>
         ) : null}
-        {currentRoom ? (
-          <div className="room-meta">
-            <div>Room <strong>{currentRoom.code}</strong></div>
-            <div>Status: <strong>{currentRoom.status}</strong></div>
-            <div>Host: <strong>{currentRoom.host || 'Host'}</strong></div>
-            {roundRemainingLabel ? <div>Time left: <strong>{roundRemainingLabel}</strong></div> : null}
-            {isRoomHost ? (
-              <div className="host-controls">
-                {currentRoom.status !== 'playing' ? (
-                  <button className="cloud-button" onClick={startRoom}>Start round</button>
-                ) : (
-                  <button className="leave-room" onClick={stopRoom}>Stop round</button>
-                )}
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-        {gameMessage ? <div className="game-message">{gameMessage}</div> : null}
-        {currentRoom ? (
-          <div className="room-player-list">
-            <div className="room-player-title">Players</div>
-            {currentRoom.players.map((player) => {
-              const isSelf = player.name === name
-              const live = livePositions[player.name]
-              return (
-                <div key={player.name} className="room-player-item">
-                  <span style={{ color: player.color }}>
-                    {player.name}
-                    {currentRoom.itName === player.name ? ' (It)' : ''}
-                  </span>
-                  {currentRoom.mode === 'survival' ? (
-                    <span className="player-status active">{Math.round(isSelf ? health : live?.health ?? player.health ?? 1000)} HP</span>
-                  ) : currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard' ? (
-                    <span className="player-status active">{isSelf ? (player.foundItems || []).length : live?.foundCount ?? 0}/{FINDER_ITEM_ICON_IDS.length}</span>
-                  ) : player.eliminated ? (
-                    <span className="player-status">Eliminated</span>
-                  ) : (
-                    <span className="player-status active">Alive</span>
-                  )}
-                </div>
-              )
-            })}
-          </div>
-        ) : null}
-        {currentRoom && (currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard') ? (
-          <div className="item-tracker">
-            <div className="room-player-title">Items ({(currentPlayer?.foundItems || []).length}/{FINDER_ITEM_ICON_IDS.length})</div>
-            {itemDistances.map((item) => (
-              <div key={item.id} className={`item-tracker-item${item.found ? ' item-tracker-found' : ''}`}>
-                <span className="item-tracker-icon" style={{ color: selectedColor }} dangerouslySetInnerHTML={{ __html: getAvatarSvg(item.iconId) }} />
-                <span>{item.found ? 'Found!' : `${Math.round(item.distanceMeters)} m`}</span>
-              </div>
-            ))}
-          </div>
-        ) : null}
+        {started ? roomStatusPanels : null}
         {started ? (
           <div className="status-panel">
             <div className="center-toggle">

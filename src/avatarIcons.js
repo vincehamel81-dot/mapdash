@@ -45,6 +45,14 @@ import laugh from 'lucide-static/icons/laugh.svg?raw'
 import trophy from 'lucide-static/icons/trophy.svg?raw'
 import target from 'lucide-static/icons/target.svg?raw'
 import glasses from 'lucide-static/icons/glasses.svg?raw'
+import car from 'lucide-static/icons/car.svg?raw'
+import carTaxi from 'lucide-static/icons/car-taxi-front.svg?raw'
+import motorbike from 'lucide-static/icons/motorbike.svg?raw'
+import bus from 'lucide-static/icons/bus.svg?raw'
+import train from 'lucide-static/icons/train-front.svg?raw'
+import helicopter from 'lucide-static/icons/helicopter.svg?raw'
+import ambulance from 'lucide-static/icons/ambulance.svg?raw'
+import truck from 'lucide-static/icons/truck.svg?raw'
 
 // The app's original marker shape, hand-kept here (not from lucide) using fill="currentColor" so
 // it recolors the same way as every other avatar, plus a dark outline so it stays visible even
@@ -97,7 +105,15 @@ export const AVATAR_ICONS = [
   { id: 'laugh', label: 'Laugh', svg: laugh },
   { id: 'trophy', label: 'Trophy', svg: trophy },
   { id: 'target', label: 'Target', svg: target },
-  { id: 'glasses', label: 'Glasses', svg: glasses }
+  { id: 'glasses', label: 'Glasses', svg: glasses },
+  { id: 'car', label: 'Car', svg: car },
+  { id: 'car-taxi', label: 'Taxi', svg: carTaxi },
+  { id: 'motorbike', label: 'Motorbike', svg: motorbike },
+  { id: 'bus', label: 'Bus', svg: bus },
+  { id: 'train', label: 'Train', svg: train },
+  { id: 'helicopter', label: 'Helicopter', svg: helicopter },
+  { id: 'ambulance', label: 'Ambulance', svg: ambulance },
+  { id: 'truck', label: 'Truck', svg: truck }
 ]
 
 export const DEFAULT_AVATAR_ID = 'arrow'

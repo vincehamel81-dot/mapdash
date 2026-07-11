@@ -1,4 +1,4 @@
--- MapDash identity + chat foundation schema.
+-- MapDashRun identity + chat foundation schema.
 -- Run this once in the Supabase project's SQL editor (Dashboard -> SQL Editor -> New query).
 -- No accounts/passwords by design (see project plan) - RLS is enabled but permissive, matching
 -- the explicitly-accepted trust model rather than restricting access.

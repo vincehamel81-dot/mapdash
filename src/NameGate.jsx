@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 
-const SESSION_KEY = 'mapdash_claimed_name'
+const SESSION_KEY = 'mapdashrun_claimed_name'
 const HEARTBEAT_MS = 20000
 const STALE_AFTER_MS = 60000
 
@@ -171,7 +171,7 @@ export default function NameGate({ children }) {
             claimName(input)
           }}
         >
-          <h1>MapDash</h1>
+          <h1>MapDashRun</h1>
           <label htmlFor="name-gate-input">Enter your name</label>
           <input
             id="name-gate-input"

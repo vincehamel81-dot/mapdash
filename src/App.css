@@ -86,8 +86,6 @@
   width: 100%;
   aspect-ratio: 1;
   border-radius: 999px;
-  /* A white swatch needs a visible border even when unselected, or it disappears against the
-     sidebar's own white background. */
   border: 2px solid #b0b5bb;
   cursor: pointer;
 }
