@@ -73,12 +73,6 @@
   cursor: pointer;
 }
 
-/* +/-, Quit, Turbo and Add cloud all share .cloud-button - doubled height per direct feedback
-   for bigger touch targets, without needing to duplicate this rule per button. */
-.cloud-button {
-  min-height: 56px;
-}
-
 .lobby-panel button:disabled,
 .cloud-button:disabled {
   background: #c2d4fc;
@@ -200,7 +194,6 @@
   color: #202124;
   border: 1px solid #dfe1e5;
   padding: 12px 14px;
-  min-height: 56px;
   border-radius: 14px;
   cursor: pointer;
 }
@@ -230,7 +223,12 @@
   border: 1px solid #e8eaed;
   display: grid;
   gap: 3px;
-  max-height: 240px;
+  /* Grows to fill whatever's left in .app-sidebar (a flex column) instead of a fixed cap, so the
+     item list - the most important part of Finder mode - is visible without having to scroll past
+     everything above it first; only the items themselves scroll internally if they still don't
+     all fit. min-height keeps it from collapsing to nothing if the sidebar is ever very cramped. */
+  flex: 1 1 auto;
+  min-height: 140px;
   overflow-y: auto;
 }
 

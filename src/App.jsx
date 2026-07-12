@@ -3,7 +3,7 @@ import maplibregl from 'maplibre-gl'
 import MapView from './MapView'
 import { CONFIG, THEMES } from './config'
 import { AVATAR_ICONS, DEFAULT_AVATAR_ID, getAvatarSvg } from './avatarIcons'
-import { FINDER_ITEMS } from './finderItems'
+import { FINDER_ITEMS, getFinderItemSvg } from './finderItems'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { useRoomSync, generateRoomCode } from './roomSync'
 import {
@@ -315,7 +315,7 @@ function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh
           {item.label ? (
             <div className={`item-marker-label${item.screenY < 12 ? ' item-marker-label-below' : ''}`}>{item.label}</div>
           ) : null}
-          <div className="item-marker-icon" dangerouslySetInnerHTML={{ __html: getAvatarSvg(item.iconId) }} />
+          <div className="item-marker-icon" dangerouslySetInnerHTML={{ __html: getFinderItemSvg(item.iconId) }} />
         </div>
       ))}
     </div>
@@ -1295,7 +1295,7 @@ export default function App({ playerName, renameName, joinRequest }) {
       const items = isFinder && graph
         ? FINDER_ITEMS.map((def, i) => {
             const pt = pickRandomStreetPoint(graph) || defaultPosition
-            return { id: `item-${i}-${crypto.randomUUID()}`, iconId: def.iconId, label: def.label, lat: pt.lat, lng: pt.lng, foundBy: null }
+            return { id: `item-${i}-${crypto.randomUUID()}`, iconId: def.id, label: def.label, lat: pt.lat, lng: pt.lng, foundBy: null }
           })
         : []
       return { players: nextPlayers, itName, items, roundStartedAt: Date.now() }
@@ -1702,7 +1702,7 @@ export default function App({ playerName, renameName, joinRequest }) {
           <div className="room-player-title">Items ({(currentPlayer?.foundItems || []).length}/{FINDER_ITEMS.length})</div>
           {itemDistances.map((item) => (
             <div key={item.id} className={`item-tracker-item${item.found ? ' item-tracker-found' : ''}`}>
-              <span className="item-tracker-icon" style={{ color: selectedColor }} dangerouslySetInnerHTML={{ __html: getAvatarSvg(item.iconId) }} />
+              <span className="item-tracker-icon" style={{ color: selectedColor }} dangerouslySetInnerHTML={{ __html: getFinderItemSvg(item.iconId) }} />
               <span>{item.label ? `${item.label} — ` : ''}{item.found ? 'Found!' : `${Math.round(item.distanceMeters)} m`}</span>
             </div>
           ))}

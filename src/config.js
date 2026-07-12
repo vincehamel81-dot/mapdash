@@ -1,13 +1,13 @@
 export const CONFIG = {
-  // Shrunk again (~80% of the previous span) and biased to extend less far south, per feedback
-  // that the box still crossed the St. Lawrence toward Lévis (city===Quebec already excludes all
-  // Lévis STREET data - see App.jsx - but the bbox rectangle itself, and hence how far the camera
-  // can pan/what basemap labels are visible, still reached across the river). North edge held
-  // fixed, south edge pulled up ~2.9km; east/west stay centered on CONFIG.startPosition. Some real
-  // Quebec City streets near the old edges now fall outside this and are filtered out - accepted
-  // tradeoff, not a bug.
+  // South edge pulled up again, this time checked against the real data rather than eyeballed:
+  // a direct scan of segments.json found the southernmost city==='Québec'-tagged point right at
+  // the old-town/riverfront longitude band (-71.195 to -71.225) sits at lat 46.7936 - anything
+  // south of there in that band is the St. Lawrence itself or Lévis on the far shore. South is now
+  // 46.8000, a comfortable ~1.5km north of that measured point, instead of a guessed value. North/
+  // west/east unchanged. Some real Quebec City streets near the old edges now fall outside this
+  // and are filtered out - accepted tradeoff, not a bug.
   bbox: {
-    south: 46.7744,
+    south: 46.8000,
     west: -71.3007,
     north: 46.8800,
     east: -71.1158
