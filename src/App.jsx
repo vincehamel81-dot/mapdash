@@ -419,10 +419,15 @@ export default function App({ playerName, renameName, joinRequest }) {
   const northUpModeRef = useRef(false)
   const activeZoomGestureRef = useRef(false)
   const themeIdRef = useRef('voyager')
+  const showDebugGraphRef = useRef(false)
 
   useEffect(() => {
     northUpModeRef.current = northUpMode
   }, [northUpMode])
+
+  useEffect(() => {
+    showDebugGraphRef.current = showDebugGraph
+  }, [showDebugGraph])
 
   useEffect(() => {
     themeIdRef.current = themeId
@@ -1037,6 +1042,30 @@ export default function App({ playerName, renameName, joinRequest }) {
           turnChoice,
           absoluteTargetMathDeg
         )
+        // Debug-only: prints the exact decision made at every real intersection crossing (entering
+        // street, every candidate considered with its angle, which one won, and whether a pending
+        // turn signal was active) - gated behind the "Debug: street graph" checkbox since it fires
+        // on every corner. Exists to get ground truth from a live repro instead of guessing, after
+        // an offline simulation of every real Rue Dalhousie intersection found the per-node angle
+        // logic behaving correctly there, which means whatever's causing "holding straight turns me
+        // onto a cross street anyway" reports needs to be caught live, not re-derived from the map
+        // data alone.
+        if (showDebugGraphRef.current) {
+          const node = graph.nodes.get(exitNodeKey)
+          const candidates = (node?.edges || [])
+            .filter((e) => e.id !== currentSegment.id)
+            .map((e) => {
+              const enteringAtStart = e.startKey === exitNodeKey
+              const angle = getLocalHeadingAtDistance(e, enteringAtStart ? 0 : e.lengthMeters, enteringAtStart ? 1 : -1)
+              return `${e.name || '(unnamed)'} [${e.id}] delta=${Math.round(signedAngleBetween(currentHeading, angle))}`
+            })
+          console.log(
+            `[nav] at intersection: entering="${currentSegment.name}" heading=${Math.round(currentHeading)} ` +
+            `turnChoice="${turnChoice}" pendingTurn=${pendingTurnRef.current || 'none'} candidates=[${candidates.join(', ')}] ` +
+            `picked="${nextEdge?.name || 'NONE'}"[${nextEdge?.id || '-'}]`
+          )
+        }
+
         if (nextEdge) {
           nextEdgeId = nextEdge.id
           nextSegment = nextEdge

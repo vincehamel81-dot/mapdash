@@ -82,6 +82,38 @@ for (const r of risky) {
 const highwayRisky = risky.filter((r) => /autoroute/i.test(r.streetName) || /autoroute/i.test(r.divertsToName))
 console.log(`\n  -> ${highwayRisky.length} of those involve a highway (matches the "highways are the most glitchy" pattern).`)
 
+// --- Issue 3: very short blocks (turn-signal timing risk) --------------------------------------
+//
+// NOT a confirmed bug list - a risk indicator. A tapped turn stays "pending" for 1.2s, meant to be
+// used at the very next intersection reached. On a very short block, that intersection arrives
+// almost immediately, which is fine on its own - the actual risk this flags is dense chains of
+// short blocks in historic-grid neighborhoods (like Vieux-Québec), where the margin for error on
+// timing gets tight. A specific real report (Rue Dalhousie) traced clean at the per-intersection
+// angle level - every candidate there was correctly scored - so this alone doesn't explain that
+// report; live console logging (gated behind the "Debug: street graph" checkbox in the app) was
+// added instead to catch the real turnChoice/pendingTurn state next time it's reproduced.
+
+const TURBO_MULTIPLIER = 2 // Turbo doubles the already-doubled display speed (see App.jsx)
+const PENDING_TURN_WINDOW_SEC = 1.2
+
+function dangerZoneMeters(speedKmh, turbo) {
+  const displaySpeedKmh = speedKmh * 2 * (turbo ? TURBO_MULTIPLIER : 1)
+  return (displaySpeedKmh / 3.6) * PENDING_TURN_WINDOW_SEC
+}
+
+const shortBlocks = allEdges.filter((e) => e.name && e.lengthMeters < dangerZoneMeters(e.speedKmh, true))
+console.log(`\nISSUE 3 - Short blocks (risk indicator, not a confirmed bug): ${shortBlocks.length} street pieces shorter than a tapped turn signal's 1.2s window at Turbo speed.`)
+console.log('(A single short block is fine; chains of them are the actual risk - see the streetName groupings below.)\n')
+const byStreet = new Map()
+for (const e of shortBlocks) {
+  if (!byStreet.has(e.name)) byStreet.set(e.name, [])
+  byStreet.get(e.name).push(e)
+}
+const chains = Array.from(byStreet.entries()).filter(([, edges]) => edges.length >= 3).sort((a, b) => b[1].length - a[1].length)
+for (const [name, edges] of chains.slice(0, 15)) {
+  console.log(`  "${name}": ${edges.length} short blocks in a row (avg ${Math.round(edges.reduce((s, e) => s + e.lengthMeters, 0) / edges.length)}m each)`)
+}
+
 // --- Write GeoJSON for visual inspection --------------------------------------------------------
 
 fs.mkdirSync(OUTPUT_DIR, { recursive: true })
