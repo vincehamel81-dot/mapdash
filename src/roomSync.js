@@ -69,25 +69,50 @@ export function useRoomSync() {
     if (!isSupabaseConfigured) return
     let cancelled = false
 
-    const load = () => {
-      supabase
-        .from('rooms')
-        .select('*')
-        .neq('status', 'closed')
-        .then(({ data, error }) => {
-          if (cancelled) return
-          if (error) {
-            console.error('Failed to load rooms:', error.message)
-            return
-          }
-          setRoomsState((data || []).map(rowToRoom))
-        })
-    }
-    load()
+    // Initial snapshot only - after this, every change is applied incrementally from the realtime
+    // payload itself (see the channel subscription below), never by re-querying. Re-querying on
+    // every change (the old approach) blindly REPLACED the entire local rooms array with whatever
+    // that SELECT happened to return - if that read raced ahead of a just-written row's visibility
+    // (a real possibility: e.g. a second player's own join event triggering a reload before the
+    // room they're joining is guaranteed consistent in that particular read), a room that had just
+    // been created, with zero errors anywhere, would silently vanish from every client's screen a
+    // few seconds later. Confirmed live as the cause of "I create a room and it disappears" /
+    // "kicked back to the setup screen every ~3s" reports. Applying the payload directly (same
+    // shape as INSERT/UPDATE/DELETE) is both race-free (no re-read to race against) and cheaper (no
+    // full-table re-fetch on every single change anywhere in the app).
+    supabase
+      .from('rooms')
+      .select('*')
+      .neq('status', 'closed')
+      .then(({ data, error }) => {
+        if (cancelled) return
+        if (error) {
+          console.error('Failed to load rooms:', error.message)
+          return
+        }
+        setRoomsState((data || []).map(rowToRoom))
+      })
 
     const channel = supabase
       .channel('rooms-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms' }, load)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms' }, (payload) => {
+        if (cancelled) return
+        setRoomsState((prev) => {
+          if (payload.eventType === 'DELETE') {
+            const deletedCode = payload.old?.code
+            return deletedCode ? prev.filter((r) => r.code !== deletedCode) : prev
+          }
+          if (payload.new?.status === 'closed') {
+            return prev.filter((r) => r.code !== payload.new.code)
+          }
+          const nextRoom = rowToRoom(payload.new)
+          const idx = prev.findIndex((r) => r.code === nextRoom.code)
+          if (idx === -1) return [...prev, nextRoom]
+          const copy = prev.slice()
+          copy[idx] = nextRoom
+          return copy
+        })
+      })
       .subscribe()
 
     return () => {

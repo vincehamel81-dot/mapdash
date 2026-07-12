@@ -844,16 +844,16 @@ export function signedAngleBetween(a, b) {
 // A/S/D means there) regardless of current heading - by direct request, since the rotating-map
 // mode's "turn relative to facing" model is deliberately NOT what that mode wants.
 // When going straight (no explicit turn signal), a candidate sharing the CURRENT street's name is
-// preferred over a smaller-angle-but-differently-named one, as long as it's still within this many
-// degrees of "plausibly straight ahead" - real streets are rarely perfectly straight through an
-// intersection, and without this a shallow-merging side street or ramp can steal a "just continue"
-// press away from the road the player is already on purely because its local departure angle
-// happens to be a few degrees smaller. Confirmed via findRiskyIntersections against the real
-// dataset (18 real intersections, mostly highway on/off-ramps) and two live-reported cases (Rue
-// Dalhousie-adjacent, Côte d'Abraham) where holding straight wrongly diverted off the current
-// street. Matches findRiskyIntersections' own threshold so the detector and the actual in-game
-// behavior agree on what counts as "plausibly straight".
-const SAME_STREET_CONTINUE_MAX_ANGLE_DEG = 40
+// preferred over a smaller-angle-but-differently-named one - real driving logic is "stay on the
+// street I'm on unless I choose to turn off it", not "take whichever option requires the least
+// steering", and a real street can curve a fair amount through an intersection and still be the
+// obvious "keep going" choice. Originally gated to within 40deg of straight (matching
+// findRiskyIntersections' detection threshold), but live feedback confirmed that was too strict -
+// same-name-street should win outright, with only a generous sanity bound to avoid ever picking a
+// near-U-turn as "continuing". Confirmed against 18 detected intersections plus multiple live
+// reports (Rue Dalhousie-adjacent, Côte d'Abraham) where holding straight wrongly diverted off the
+// current street.
+const SAME_STREET_CONTINUE_MAX_ANGLE_DEG = 150
 
 export function chooseNextSegment(graph, nodeKey, currentEdge, currentHeadingDeg, turnPreference = 'straight', absoluteTargetDeg = null) {
   const node = graph.nodes.get(nodeKey)
