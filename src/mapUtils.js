@@ -715,7 +715,62 @@ export function buildGraph(segments, {
     node.edges = node.edges.filter((edge) => edge.lengthMeters >= MIN_EDGE_LENGTH_METERS)
   }
 
+  mergeCollinearSameNameEdges(nodes, edges)
+
   return { nodes, edges }
+}
+
+// Collapses any node with exactly 2 edges that share the same street name into one longer edge -
+// a 2-degree node never offered a real turn choice in the first place (chooseNextSegment only ever
+// had one candidate there), so this can never remove a real decision point. Confirmed live as the
+// fix for a real regression: dense intersections (multiple streets all meeting within a few
+// meters) can end up with several short same-name fragments in a row after splitting - each one's
+// local heading is computed from just its own short span, and that heading noise was occasionally
+// bad enough to send chooseNextSegment straight back onto the fragment the car had just arrived
+// from (a phantom U-turn). It also directly addresses the reported "camera feels sea-sick"
+// jitter - fewer, longer edges means fewer local-heading recalculations per second of driving.
+function mergeCollinearSameNameEdges(nodes, edges) {
+  let mergedAny = true
+  let safety = 0
+  while (mergedAny && safety < 50) {
+    mergedAny = false
+    safety++
+    // Snapshot before the pass - nodes/edges mutate as merges are applied within this same pass,
+    // so every candidate is re-validated against the live maps before use.
+    for (const node of Array.from(nodes.values())) {
+      if (!nodes.has(node.key)) continue // removed by an earlier merge this pass
+      if (node.edges.length !== 2) continue
+      const [a, b] = node.edges
+      if (!a.name || a.name !== b.name || a.id === b.id) continue
+      if (!edges.has(a.id) || !edges.has(b.id)) continue // stale reference from an earlier merge this pass
+
+      const otherKeyA = a.startKey === node.key ? a.endKey : a.startKey
+      const otherKeyB = b.startKey === node.key ? b.endKey : b.startKey
+      if (otherKeyA === node.key || otherKeyB === node.key) continue // degenerate self-loop, skip
+
+      // Build one continuous polyline: otherEndOfA -> node -> otherEndOfB.
+      const toNode = a.endKey === node.key ? a.polyline : a.polyline.slice().reverse()
+      const fromNode = b.startKey === node.key ? b.polyline : b.polyline.slice().reverse()
+      const mergedPolyline = dedupeConsecutivePoints(toNode.concat(fromNode.slice(1)))
+
+      const merged = packageSegment({ ...a, id: `${a.id}+${b.id}`, polyline: mergedPolyline })
+      merged.startKey = otherKeyA
+      merged.endKey = otherKeyB
+
+      edges.delete(a.id)
+      edges.delete(b.id)
+      edges.set(merged.id, merged)
+      nodes.delete(node.key)
+
+      for (const key of new Set([otherKeyA, otherKeyB])) {
+        const other = nodes.get(key)
+        if (!other) continue
+        other.edges = other.edges.map((e) => (e.id === a.id || e.id === b.id ? merged : e))
+      }
+
+      mergedAny = true
+    }
+  }
 }
 
 // Coordinates relative to (refLat, refLng), in meters. The caller must pass the SAME reference
@@ -894,10 +949,17 @@ export function chooseNextSegment(graph, nodeKey, currentEdge, currentHeadingDeg
       const otherStreet = directional.filter((choice) => choice.edge.name !== currentEdge.name)
       filtered = otherStreet.length ? otherStreet : directional.length ? directional : choices
     } else if (currentEdge.name) {
-      const sameStreet = choices
-        .filter((choice) => choice.edge.name === currentEdge.name)
-        .sort((a, b) => a.absAngle - b.absAngle)[0]
-      if (sameStreet && sameStreet.absAngle <= SAME_STREET_CONTINUE_MAX_ANGLE_DEG) {
+      // Among same-named options that are at least plausibly "continuing" (within the angle
+      // bound), prefer the LONGEST one rather than the smallest angle. A short stub's local
+      // heading is measured from just a few meters of polyline and is noisy enough to occasionally
+      // look "straighter" than the real, longer continuation - confirmed live as the cause of a
+      // back-and-forth oscillation at a crowded intersection where the same street name touched
+      // one node from two separate short fragments (Rue Saint-Vallier Est / Rue de la Couronne):
+      // picking by smallest angle kept bouncing onto a 4.6m stub instead of the real ~87m
+      // continuation.
+      const plausible = choices.filter((choice) => choice.edge.name === currentEdge.name && choice.absAngle <= SAME_STREET_CONTINUE_MAX_ANGLE_DEG)
+      const sameStreet = plausible.sort((a, b) => b.edge.lengthMeters - a.edge.lengthMeters)[0]
+      if (sameStreet) {
         filtered = [sameStreet]
       }
     }
