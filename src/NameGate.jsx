@@ -24,7 +24,20 @@ export default function NameGate({ children }) {
     if (!isSupabaseConfigured) return
     if (heartbeatRef.current) clearInterval(heartbeatRef.current)
     heartbeatRef.current = window.setInterval(() => {
-      supabase.from('online_players').update({ last_seen: new Date().toISOString() }).eq('name_lower', nameLower)
+      // TODO(debug): a repeated live report of friends showing "Offline" while actively chatting
+      // hasn't been explained - this update had no error handling and no way to tell if it was
+      // silently affecting zero rows, so logging both explicitly until it's confirmed working or
+      // caught failing.
+      supabase
+        .from('online_players')
+        .update({ last_seen: new Date().toISOString() })
+        .eq('name_lower', nameLower)
+        .select('name_lower')
+        .then(({ data, error }) => {
+          if (error) console.error('[heartbeat] update failed:', error.message)
+          else if (!data?.length) console.warn('[heartbeat] update affected 0 rows for', nameLower, '- row may not exist')
+          else console.log('[heartbeat] ok for', nameLower, 'at', new Date().toISOString())
+        })
     }, HEARTBEAT_MS)
   }, [])
 

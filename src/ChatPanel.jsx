@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 import { MODE_CONFIG } from './App'
 
@@ -40,18 +40,29 @@ export default function ChatPanel({ myName, onRequestJoin }) {
         .neq('name_lower', myNameLower)
         .gte('last_seen', new Date(Date.now() - ONLINE_STALE_MS).toISOString())
 
-    fetchOnline().then(({ data }) => {
+    // TODO(debug): pairs with the heartbeat logging in NameGate.jsx - logs the exact staleness
+    // cutoff and every row's own last_seen so a "shows Offline" report can be checked directly
+    // against what this query actually saw, instead of guessing.
+    const logFetch = (data, error, source) => {
+      if (error) { console.error('[online] fetch failed:', error.message); return }
+      const cutoff = new Date(Date.now() - ONLINE_STALE_MS).toISOString()
+      console.log(`[online] ${source} fetch, cutoff=${cutoff}, rows=`, (data || []).map((r) => `${r.display_name}@${r.last_seen}`))
+    }
+
+    fetchOnline().then(({ data, error }) => {
+      logFetch(data, error, 'initial')
       if (!cancelled && data) setOnlinePlayers(data)
     })
 
     const channel = supabase
       .channel('online_players-changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'online_players' }, () => {
-        fetchOnline().then(({ data }) => {
+        fetchOnline().then(({ data, error }) => {
+          logFetch(data, error, 'realtime-triggered')
           if (data) setOnlinePlayers(data)
         })
       })
-      .subscribe()
+      .subscribe((status) => console.log('[online] channel subscribe status:', status))
 
     return () => {
       cancelled = true
@@ -199,12 +210,32 @@ export default function ChatPanel({ myName, onRequestJoin }) {
     [messages, myNameLower, lastSeenAt]
   )
 
+  const draftInputRef = useRef(null)
+
   const toggleOpen = () => {
     setOpen((o) => {
       if (!o) setLastSeenAt(Date.now())
       return !o
     })
   }
+
+  // "/" opens chat and focuses the composer, same convention as Slack/Discord - ignored while
+  // already typing somewhere else (room code, name fields, the composer itself) so it doesn't
+  // hijack a literal "/" character being typed.
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.key !== '/') return
+      const active = document.activeElement
+      const isTyping = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)
+      if (isTyping) return
+      e.preventDefault()
+      setOpen(true)
+      setLastSeenAt(Date.now())
+      requestAnimationFrame(() => draftInputRef.current?.focus())
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
 
   // green = actively playing a round, yellow = online (in a room's lobby or just browsing), red =
   // not online at all. `online` is undefined for a friend who isn't in the (already
@@ -228,8 +259,8 @@ export default function ChatPanel({ myName, onRequestJoin }) {
 
   return (
     <div className={`chat-panel ${open ? 'open' : 'collapsed'}`}>
-      <button className="chat-toggle" onClick={toggleOpen}>
-        {open ? 'Close chat' : 'Chat'}
+      <button className="chat-toggle" onClick={toggleOpen} title={open ? 'Close chat' : 'Chat'}>
+        {open ? 'x' : 'Chat'}
         {!open && unreadCount ? <span className="chat-unread-badge">{unreadCount > 99 ? '99+' : unreadCount}</span> : null}
       </button>
       {open ? (
@@ -299,7 +330,7 @@ export default function ChatPanel({ myName, onRequestJoin }) {
                 ))}
               </div>
               <form className="chat-compose" onSubmit={sendMessage}>
-                <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Say something..." maxLength={500} />
+                <input ref={draftInputRef} value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Say something..." maxLength={500} />
                 <button type="submit">Send</button>
               </form>
             </div>

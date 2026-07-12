@@ -7,10 +7,10 @@ export const CONFIG = {
   // found legitimate Québec-tagged streets extend much further south around -71.30, likely
   // Sainte-Foy - sacrificed to keep the box centered tighter on downtown).
   bbox: {
-    south: 46.8050,
-    west: -71.2600,
-    north: 46.8700,
-    east: -71.1400
+    south: 46.79647881362492,
+    west: -71.39947527908767,
+    north: 46.87402689541307,
+    east: -71.19891865935556
   },
   defaultZoom: 15,
   minZoom: 12,

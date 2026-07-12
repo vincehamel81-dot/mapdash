@@ -269,6 +269,18 @@
   height: 100%;
 }
 
+.host-badge {
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+.room-player-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 .player-status {
   font-size: 0.82rem;
   padding: 4px 8px;

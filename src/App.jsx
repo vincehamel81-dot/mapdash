@@ -723,6 +723,12 @@ export default function App({ playerName, renameName, joinRequest }) {
   const movementRef = useRef({ distanceAlong: 0, direction: 1 })
   const animationRef = useRef(null)
   const pendingTurnRef = useRef(null)
+  // North-up mode only: the last compass target direction/forward-vs-backward was actually
+  // decided for. See the tick loop below - without this, the decision re-ran every single frame
+  // using the LOCAL heading at the car's exact current position, and on a street that curves even
+  // a little, that local heading can briefly favor "backward" over "forward" while the player is
+  // steadily holding the same key the whole time, causing an unintended reversal mid-block.
+  const lastAbsoluteTargetRef = useRef(null)
   // Host-only local simulation state for every ambient NPC currently in the room: name ->
   // { edgeId, distanceAlong, direction }. Never persisted or broadcast itself - only the resulting
   // lat/lng gets broadcast (see the NPC tick effect below), same as a real player's own position.
@@ -1031,14 +1037,22 @@ export default function App({ playerName, renameName, joinRequest }) {
       // S/ArrowDown flips it instantly (see the keydown handler near pendingTurnRef) instead of
       // reverse being a held gear - so unlike the old model, this is always the car's true
       // current travel direction, nothing else combines with it per-frame. In north-up mode,
-      // instead it's picked fresh every frame to match whichever way better serves the held key.
-      if (absoluteTargetMathDeg !== null) {
+      // forward-vs-backward is decided fresh only when the held compass key actually CHANGES, not
+      // every single frame while the same key stays held - re-deciding continuously used the
+      // LOCAL heading at the car's exact current position, and on any street that curves even a
+      // little, that local heading can briefly favor "backward" over "forward" mid-block even
+      // though the player never let go of the key, causing an unintended reversal. Freezing the
+      // decision at entry (re-run again only at the next real intersection, via chooseNextSegment)
+      // matches how a real driver thinks: keep going the way you're already going until there's an
+      // actual choice to make.
+      if (absoluteTargetMathDeg !== null && absoluteTargetMathDeg !== lastAbsoluteTargetRef.current) {
         const forwardHeading = normalizeAngle(getLocalHeadingAtDistance(currentSegment, movementRef.current.distanceAlong, 1))
         const backwardHeading = normalizeAngle(getLocalHeadingAtDistance(currentSegment, movementRef.current.distanceAlong, -1))
         const forwardDelta = Math.abs(signedAngleBetween(absoluteTargetMathDeg, forwardHeading))
         const backwardDelta = Math.abs(signedAngleBetween(absoluteTargetMathDeg, backwardHeading))
         movementRef.current.direction = forwardDelta <= backwardDelta ? 1 : -1
       }
+      lastAbsoluteTargetRef.current = absoluteTargetMathDeg
       const direction = movementRef.current.direction
       const travelDelta = metersPerSecond * dt * direction
       let nextDistanceAlong = movementRef.current.distanceAlong + travelDelta
@@ -1601,7 +1615,11 @@ export default function App({ playerName, renameName, joinRequest }) {
       return
     }
     const remainingPlayers = room.players.filter((player) => player.name !== name)
-    if (!remainingPlayers.length) {
+    // NPCs can never be host (only a real player's own client ever simulates them, so an
+    // NPC-only room has no one left to run anything anyway) - the actual "is anyone left"
+    // check is about remaining HUMANS, not the raw players array.
+    const remainingHumans = remainingPlayers.filter((player) => !player.isNpc)
+    if (!remainingHumans.length) {
       // Explicit delete for the one room actually being emptied - updateRooms/setRooms no longer
       // infers deletion from omission (see roomSync.js), so this can't accidentally take any
       // other room down with it.
@@ -1620,13 +1638,18 @@ export default function App({ playerName, renameName, joinRequest }) {
           : 'finished'
       }
       if (room.host === name) {
-        nextRoom.host = remainingPlayers[0].name
+        nextRoom.host = remainingHumans[0].name
       }
       setRooms(roomsRef.current.map((r) => (r.code === joinedRoomCode ? nextRoom : r)))
     }
 
     setJoinedRoomCode(null)
     setStarted(false)
+    // Otherwise the Room Code field still shows the room you just left, so clicking "Create room"
+    // immediately after reuses that same code and just alerts "already exists" - clearing it back
+    // to blank means Create room auto-generates a fresh one by default, matching how it behaves
+    // the very first time (see createRoom's `roomCode.trim() || generateRoomCode()`).
+    setRoomCode('')
   }, [joinedRoomCode, name, setRooms, roomsRef, deleteRoom])
 
   useEffect(() => {
@@ -1734,6 +1757,12 @@ export default function App({ playerName, renameName, joinRequest }) {
     if (!joinedRoomCode) return
     const room = roomsRef.current.find((r) => r.code === joinedRoomCode)
     if (!room || room.host !== name) return
+    // Matches the same restriction real players already have (joinRoom blocks joining a
+    // host-gated round mid-play) - Team has no lobby gate at all, so it's exempt, same as humans.
+    if (MODE_CONFIG[room.mode]?.hostGatedStart && room.status === 'playing') {
+      alert("Can't add players once the round has started.")
+      return
+    }
     if (room.players.length >= room.maxPlayers) {
       alert('This room is full.')
       return
@@ -1950,6 +1979,20 @@ export default function App({ playerName, renameName, joinRequest }) {
   // the normal sidebar position once driving. Built once, referenced in whichever of those two
   // mutually-exclusive spots applies.
   const roomMinPlayers = currentRoom ? MODE_CONFIG[currentRoom.mode]?.minPlayers ?? 2 : 2
+  // Highest score first (found-item count for Finder, HP for Survival) - other modes keep roster
+  // order as-is, there's no single "score" to rank Tag/Team by.
+  const sortedRosterPlayers = useMemo(() => {
+    if (!currentRoom?.players?.length) return currentRoom?.players || []
+    const rankable = currentRoom.mode === 'survival' || currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard'
+    if (!rankable) return currentRoom.players
+    const scoreFor = (p) => {
+      if (currentRoom.mode === 'survival') {
+        return p.name === name ? health : livePositions[p.name]?.health ?? p.health ?? 1000
+      }
+      return p.name === name ? (p.foundItems || []).length : livePositions[p.name]?.foundCount ?? 0
+    }
+    return [...currentRoom.players].sort((a, b) => scoreFor(b) - scoreFor(a))
+  }, [currentRoom, name, health, livePositions])
   const roomStatusPanels = currentRoom ? (
     <>
       <div className="room-meta">
@@ -1983,28 +2026,32 @@ export default function App({ playerName, renameName, joinRequest }) {
             </button>
           ) : null}
         </div>
-        {currentRoom.players.map((player) => {
+        {sortedRosterPlayers.map((player) => {
           const isSelf = player.name === name
           const live = livePositions[player.name]
           return (
             <div key={player.name} className="room-player-item">
               <span className="room-player-identity" style={{ color: player.color }}>
+                {player.name === currentRoom.host ? <span className="host-badge" title="Host - can add/remove NPCs">👑</span> : null}
                 <span className="room-player-avatar" dangerouslySetInnerHTML={{ __html: getAvatarSvg(player.avatarId) }} />
                 {player.name}
                 {player.isNpc ? ' (Bot)' : ''}
                 {currentRoom.itName === player.name ? ' (It)' : ''}
               </span>
-              {player.isNpc ? (
-                isRoomHost ? <button className="room-meta-btn" onClick={() => removeNpc(player.name)} title="Remove NPC">x</button> : null
-              ) : currentRoom.mode === 'survival' ? (
-                <span className="player-status active">{Math.round(isSelf ? health : live?.health ?? player.health ?? 1000)} HP</span>
-              ) : currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard' ? (
-                <span className="player-status active">{isSelf ? (player.foundItems || []).length : live?.foundCount ?? 0}/{FINDER_ITEMS.length}</span>
-              ) : player.eliminated ? (
-                <span className="player-status">{currentRoom.mode === 'tag' ? 'Caught' : 'Eliminated'}</span>
-              ) : (
-                <span className="player-status active">Alive</span>
-              )}
+              <span className="room-player-actions">
+                {currentRoom.mode === 'survival' ? (
+                  <span className="player-status active">{Math.round(isSelf ? health : live?.health ?? player.health ?? 1000)} HP</span>
+                ) : currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard' ? (
+                  <span className="player-status active">{isSelf ? (player.foundItems || []).length : live?.foundCount ?? 0}/{FINDER_ITEMS.length}</span>
+                ) : player.eliminated ? (
+                  <span className="player-status">{currentRoom.mode === 'tag' ? 'Caught' : 'Eliminated'}</span>
+                ) : (
+                  <span className="player-status active">Alive</span>
+                )}
+                {player.isNpc && isRoomHost ? (
+                  <button className="room-meta-btn" onClick={() => removeNpc(player.name)} title="Remove NPC">x</button>
+                ) : null}
+              </span>
             </div>
           )
         })}
@@ -2091,7 +2138,7 @@ export default function App({ playerName, renameName, joinRequest }) {
                 {MODE_CONFIG[mode]?.roomBased ? (
                   <>
                     <label>Room code</label>
-                    <input value={roomCode} onChange={(e) => setRoomCode(e.target.value.toUpperCase())} placeholder="ROOM123" />
+                    <input value={roomCode} onChange={(e) => setRoomCode(e.target.value.toUpperCase())} placeholder="ROOM123" maxLength={10} />
                     <div className="room-actions">
                       <button onClick={() => joinRoom()}>Join room</button>
                       <button onClick={createRoom}>Create room</button>
