@@ -880,12 +880,19 @@ export function chooseNextSegment(graph, nodeKey, currentEdge, currentHeadingDeg
 
   let filtered = choices
   if (absoluteTargetDeg === null) {
-    if (turnPreference === 'left') {
-      const left = choices.filter((choice) => choice.angleDelta > 10)
-      filtered = left.length ? left : choices
-    } else if (turnPreference === 'right') {
-      const right = choices.filter((choice) => choice.angleDelta < -10)
-      filtered = right.length ? right : choices
+    if (turnPreference === 'left' || turnPreference === 'right') {
+      const directional = turnPreference === 'left'
+        ? choices.filter((choice) => choice.angleDelta > 10)
+        : choices.filter((choice) => choice.angleDelta < -10)
+      // Continuing on the SAME street the player is already on is never what an explicit
+      // left/right press means, even when its angle technically clears the threshold above - real
+      // streets are rarely perfectly straight, so "continue on Rue Couillard" can register as a
+      // few degrees "right" too, and being the smallest angle in that bucket was winning over a
+      // real, sharply-angled turn onto a genuinely different street at the same intersection.
+      // Falls back to the unfiltered directional set (then to every choice) so a real dead end or
+      // a same-named fork as the only option in that direction still works.
+      const otherStreet = directional.filter((choice) => choice.edge.name !== currentEdge.name)
+      filtered = otherStreet.length ? otherStreet : directional.length ? directional : choices
     } else if (currentEdge.name) {
       const sameStreet = choices
         .filter((choice) => choice.edge.name === currentEdge.name)
