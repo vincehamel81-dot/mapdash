@@ -362,7 +362,7 @@ export default function App({ playerName, renameName, joinRequest }) {
   const [selectedAvatarId, setSelectedAvatarId] = useState(DEFAULT_AVATAR_ID)
   const [appearanceLoaded, setAppearanceLoaded] = useState(!isSupabaseConfigured)
   const [cloudCooldown, setCloudCooldown] = useState(false)
-  const [rooms, setRooms] = useRoomSync()
+  const [rooms, setRooms, roomsRef, deleteRoom] = useRoomSync()
   const [joinedRoomCode, setJoinedRoomCode] = useState(null)
   const [eliminated, setEliminated] = useState(false)
   const [gameMessage, setGameMessage] = useState('')
@@ -767,18 +767,25 @@ export default function App({ playerName, renameName, joinRequest }) {
         quitGame()
         return
       }
-      if (e.key === 'a' || e.key === 'ArrowLeft') {
+      // e.repeat is true for the OS's own key-repeat keydown events fired while a key is held,
+      // not just the initial press - without this guard, simply holding A/D for normal steering
+      // (not a deliberate tap) kept re-arming a fresh 3s window on every repeat tick, so the
+      // pending turn effectively never expired while held and could still be lingering nearly 3s
+      // after release. In dense urban blocks with intersections closer together than that, a turn
+      // signal meant for one intersection was firing at the NEXT one instead - a very plausible
+      // root cause for "it turns somewhere I didn't ask it to" reports. Also shortened the window
+      // itself (3s -> 1.2s) so even a genuine tap doesn't linger across multiple close intersections.
+      if ((e.key === 'a' || e.key === 'ArrowLeft') && !e.repeat) {
         pendingTurnRef.current = 'left'
         setNextTurnSignal('left')
-        // clear after 3s
         window.setTimeout(() => {
           if (pendingTurnRef.current === 'left') {
             pendingTurnRef.current = null
             setNextTurnSignal(turnPreferenceRef.current)
           }
-        }, 3000)
+        }, 1200)
       }
-      if (e.key === 'd' || e.key === 'ArrowRight') {
+      if ((e.key === 'd' || e.key === 'ArrowRight') && !e.repeat) {
         pendingTurnRef.current = 'right'
         setNextTurnSignal('right')
         window.setTimeout(() => {
@@ -786,7 +793,7 @@ export default function App({ playerName, renameName, joinRequest }) {
             pendingTurnRef.current = null
             setNextTurnSignal(turnPreferenceRef.current)
           }
-        }, 3000)
+        }, 1200)
       }
     }
     window.addEventListener('keydown', onKey)
@@ -1312,15 +1319,21 @@ export default function App({ playerName, renameName, joinRequest }) {
 
   const getRoomCapacity = (roomMode) => MODE_CONFIG[roomMode]?.maxPlayers ?? 4
 
+  // Reads from roomsRef (kept synchronously fresh by useRoomSync on every updateRooms call, not
+  // just on the next render) instead of the closed-over `rooms` state - confirmed as the actual
+  // root cause of a real data-loss bug: two Finder items found close together (well within a
+  // single animation frame, before React had re-rendered with the first find's result) could
+  // race, with the second updateRoom call computing its diff from a rooms snapshot that predated
+  // the first item's find, silently overwriting it (seen live as "found 2 items, then a few
+  // seconds later it reverted to 1"). This also makes updateRoom referentially stable forever
+  // (roomsRef and setRooms never change identity), which is the deeper fix - nothing holding a
+  // reference to it (liveRef included) can ever go stale in the first place.
   const updateRoom = useCallback(
     (roomCodeToUpdate, roomUpdater) => {
-      const nextRooms = rooms.map((room) => {
-        if (room.code !== roomCodeToUpdate) return room
-        return roomUpdater(room)
-      })
+      const nextRooms = roomsRef.current.map((room) => (room.code === roomCodeToUpdate ? roomUpdater(room) : room))
       setRooms(nextRooms)
     },
-    [rooms, setRooms]
+    [setRooms, roomsRef]
   )
 
 
@@ -1431,10 +1444,10 @@ export default function App({ playerName, renameName, joinRequest }) {
 
   const closeRoom = useCallback(() => {
     if (!currentRoom) return
-    setRooms(rooms.filter((room) => room.code !== currentRoom.code))
+    deleteRoom(currentRoom.code)
     setJoinedRoomCode(null)
     setStarted(false)
-  }, [currentRoom, rooms, setRooms])
+  }, [currentRoom, deleteRoom])
 
   const startRoom = useCallback(() => {
     if (!currentRoom || !isRoomHost) return
@@ -1474,34 +1487,40 @@ export default function App({ playerName, renameName, joinRequest }) {
   const leaveRoom = useCallback(() => {
     if (!joinedRoomCode) return
 
-    const nextRooms = rooms
-      .map((room) => {
-        if (room.code !== joinedRoomCode) return room
-        const remainingPlayers = room.players.filter((player) => player.name !== name)
-        if (!remainingPlayers.length) return null
-        const cfg = MODE_CONFIG[room.mode]
-        const nextRoom = {
-          ...room,
-          players: remainingPlayers,
-          status: !cfg?.hostGatedStart
-            ? remainingPlayers.length >= cfg?.minPlayers
-              ? 'playing'
-              : 'waiting'
-            : remainingPlayers.length >= cfg.minPlayers
-            ? room.status
-            : 'finished'
-        }
-        if (room.host === name) {
-          nextRoom.host = remainingPlayers[0].name
-        }
-        return nextRoom
-      })
-      .filter(Boolean)
+    const room = roomsRef.current.find((r) => r.code === joinedRoomCode)
+    if (!room) {
+      setJoinedRoomCode(null)
+      setStarted(false)
+      return
+    }
+    const remainingPlayers = room.players.filter((player) => player.name !== name)
+    if (!remainingPlayers.length) {
+      // Explicit delete for the one room actually being emptied - updateRooms/setRooms no longer
+      // infers deletion from omission (see roomSync.js), so this can't accidentally take any
+      // other room down with it.
+      deleteRoom(joinedRoomCode)
+    } else {
+      const cfg = MODE_CONFIG[room.mode]
+      const nextRoom = {
+        ...room,
+        players: remainingPlayers,
+        status: !cfg?.hostGatedStart
+          ? remainingPlayers.length >= cfg?.minPlayers
+            ? 'playing'
+            : 'waiting'
+          : remainingPlayers.length >= cfg.minPlayers
+          ? room.status
+          : 'finished'
+      }
+      if (room.host === name) {
+        nextRoom.host = remainingPlayers[0].name
+      }
+      setRooms(roomsRef.current.map((r) => (r.code === joinedRoomCode ? nextRoom : r)))
+    }
 
-    setRooms(nextRooms)
     setJoinedRoomCode(null)
     setStarted(false)
-  }, [joinedRoomCode, name, rooms, setRooms])
+  }, [joinedRoomCode, name, setRooms, roomsRef, deleteRoom])
 
   useEffect(() => {
     leaveRoomRef.current = leaveRoom
@@ -1510,7 +1529,12 @@ export default function App({ playerName, renameName, joinRequest }) {
   const createRoom = useCallback(() => {
     const sanitizedName = name.trim() || 'Player'
     const code = roomCode.trim().toUpperCase() || generateRoomCode()
-    const existing = rooms.find((room) => room.code === code)
+    // Reads roomsRef (synchronously fresh, see updateRoom above) instead of the closed-over
+    // `rooms` state - confirmed as the likely cause of "create twice, kicks everyone out": if
+    // Create was clicked again before React had re-rendered with the first click's result, the
+    // closed-over `rooms` was still the PRE-create snapshot, and `[...stale_rooms, newRoom]`
+    // silently dropped whatever the first create (or any other room) had just added.
+    const existing = roomsRef.current.find((room) => room.code === code)
     if (existing) {
       alert('Room code already exists. Pick another code or join this room.')
       return
@@ -1531,11 +1555,11 @@ export default function App({ playerName, renameName, joinRequest }) {
       maxPlayers: getRoomCapacity(mode)
     }
 
-    setRooms([...rooms, newRoom])
+    setRooms([...roomsRef.current, newRoom])
     setJoinedRoomCode(code)
     setRoomCode(code)
     setStarted(!MODE_CONFIG[mode]?.hostGatedStart)
-  }, [mode, name, roomCode, selectedColor, selectedAvatarId, rooms, setRooms])
+  }, [mode, name, roomCode, selectedColor, selectedAvatarId, setRooms, roomsRef])
 
   const joinRoom = useCallback(
     (codeToJoin) => {
@@ -1544,7 +1568,10 @@ export default function App({ playerName, renameName, joinRequest }) {
         alert('Enter a room code to join.')
         return
       }
-      const room = rooms.find((item) => item.code === code)
+      // roomsRef instead of the closed-over `rooms` state, same reasoning/fix as createRoom above
+      // - confirmed as the likely cause of "join twice, kicks you out": a stale `rooms` snapshot
+      // here could compute nextRooms from before some other pending update landed, dropping it.
+      const room = roomsRef.current.find((item) => item.code === code)
       if (!room) {
         alert('Room not found.')
         return
@@ -1581,13 +1608,13 @@ export default function App({ playerName, renameName, joinRequest }) {
         status: MODE_CONFIG[room.mode]?.hostGatedStart ? room.status : 'playing'
       }
 
-      const nextRooms = rooms.map((item) => (item.code === code ? nextRoom : item))
+      const nextRooms = roomsRef.current.map((item) => (item.code === code ? nextRoom : item))
       setRooms(nextRooms)
       setJoinedRoomCode(code)
       setMode(room.mode)
       setStarted(nextRoom.status === 'playing')
     },
-    [roomCode, rooms, selectedColor, selectedAvatarId, name, currentPlayer, setRooms]
+    [roomCode, selectedColor, selectedAvatarId, name, currentPlayer, setRooms, roomsRef]
   )
 
   // "Join" from ChatPanel: App and ChatPanel are sibling components with no shared state, so

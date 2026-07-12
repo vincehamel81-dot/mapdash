@@ -96,9 +96,16 @@ export function useRoomSync() {
     }
   }, [])
 
+  // Only ever upserts, never deletes-by-diffing - confirmed via a live 2-client race test that
+  // the old "delete anything in my own last-known list that's missing from what I'm about to
+  // write" approach could genuinely destroy a room outright (not just lose a player update): any
+  // client whose own local `rooms` happened to be even slightly behind (a brand-new tab whose
+  // initial load/subscribe hadn't fully caught up yet, for instance) would treat that gap as "this
+  // room was removed" and delete it from Supabase for everyone, real players included. Deletion is
+  // now only ever explicit (see deleteRoom below), called with the one specific code a caller
+  // actually intends to remove - never inferred from what's absent in a possibly-incomplete list.
   const updateRooms = useCallback((nextRooms) => {
     const prevByCode = new Map(roomsRef.current.map((r) => [r.code, r]))
-    const nextByCode = new Map(nextRooms.map((r) => [r.code, r]))
 
     if (isSupabaseConfigured) {
       for (const room of nextRooms) {
@@ -112,23 +119,32 @@ export function useRoomSync() {
             })
         }
       }
-      for (const room of roomsRef.current) {
-        if (!nextByCode.has(room.code)) {
-          supabase
-            .from('rooms')
-            .delete()
-            .eq('code', room.code)
-            .then(({ error }) => {
-              if (error) console.error('Failed to remove room:', error.message)
-            })
-        }
-      }
     }
 
     // Optimistic local update - the postgres_changes subscription above will reconcile shortly
     // after, but applying it immediately keeps the UI responsive instead of waiting a round trip.
+    // roomsRef is updated synchronously right here too, not just via the top-of-render line above
+    // - callers that need to read-after-write within the same tick (e.g. App.jsx's updateRoom,
+    // called from the animation-frame movement loop, well outside React's normal render cycle)
+    // would otherwise see a stale value until React actually gets around to re-rendering.
+    roomsRef.current = nextRooms
     setRoomsState(nextRooms)
   }, [])
 
-  return [rooms, updateRooms]
+  const deleteRoom = useCallback((code) => {
+    if (isSupabaseConfigured) {
+      supabase
+        .from('rooms')
+        .delete()
+        .eq('code', code)
+        .then(({ error }) => {
+          if (error) console.error('Failed to remove room:', error.message)
+        })
+    }
+    const nextRooms = roomsRef.current.filter((room) => room.code !== code)
+    roomsRef.current = nextRooms
+    setRoomsState(nextRooms)
+  }, [])
+
+  return [rooms, updateRooms, roomsRef, deleteRoom]
 }

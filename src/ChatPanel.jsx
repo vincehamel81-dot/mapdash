@@ -22,6 +22,10 @@ export default function ChatPanel({ myName, onRequestJoin }) {
   const [incomingRequests, setIncomingRequests] = useState([]) // rows where I'm followed, status='pending'
   const [messages, setMessages] = useState([])
   const [draft, setDraft] = useState('')
+  // Baseline for the unread badge - only messages newer than this (and not sent by me) count,
+  // so opening chat for the first time in a session doesn't dump the entire 100-message history
+  // in as "unread". Bumped to now every time chat is opened (marks everything seen).
+  const [lastSeenAt, setLastSeenAt] = useState(() => Date.now())
 
   const myNameLower = myName.toLowerCase()
 
@@ -138,8 +142,10 @@ export default function ChatPanel({ myName, onRequestJoin }) {
   // The merged feed: everyone I'm mutually accepted with, plus myself. Re-fetched on any message
   // insert anywhere (no per-sender filter possible for an "IN (...)" style list via postgres_changes)
   // rather than trying to filter server-side - message volume here is low enough that this is fine.
+  // Runs regardless of `open` (not gated on the panel being visible) so the unread badge can count
+  // new messages while chat is closed, not just while it's open.
   useEffect(() => {
-    if (!isSupabaseConfigured || !open) return
+    if (!isSupabaseConfigured) return
     let cancelled = false
     const senders = [myNameLower, ...acceptedLowerSet]
 
@@ -166,7 +172,7 @@ export default function ChatPanel({ myName, onRequestJoin }) {
       supabase.removeChannel(channel)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, myNameLower, acceptedFriends.length])
+  }, [myNameLower, acceptedFriends.length])
 
   const sendMessage = useCallback((e) => {
     e.preventDefault()
@@ -184,6 +190,21 @@ export default function ChatPanel({ myName, onRequestJoin }) {
   }, [draft, myNameLower, myName])
 
   const onlineByName = useMemo(() => new Map(onlinePlayers.map((p) => [p.name_lower, p])), [onlinePlayers])
+  // Anyone already shown in Friends shouldn't also show up in Online - same person, same status
+  // dot either way, just duplicated real estate.
+  const onlineNonFriends = useMemo(() => onlinePlayers.filter((p) => !acceptedLowerSet.has(p.name_lower)), [onlinePlayers, acceptedLowerSet])
+
+  const unreadCount = useMemo(
+    () => messages.filter((m) => m.sender_name_lower !== myNameLower && new Date(m.created_at).getTime() > lastSeenAt).length,
+    [messages, myNameLower, lastSeenAt]
+  )
+
+  const toggleOpen = () => {
+    setOpen((o) => {
+      if (!o) setLastSeenAt(Date.now())
+      return !o
+    })
+  }
 
   // green = actively playing a round, yellow = online (in a room's lobby or just browsing), red =
   // not online at all. `online` is undefined for a friend who isn't in the (already
@@ -194,10 +215,22 @@ export default function ChatPanel({ myName, onRequestJoin }) {
     return 'yellow'
   }
 
+  function statusLabel(online) {
+    if (!online) return 'Offline'
+    if (online.room_code && online.room_status === 'playing') return `In-game (${MODE_CONFIG[online.room_mode]?.label || online.room_mode})`
+    if (online.room_code) return 'Lobby'
+    return 'Online'
+  }
+
+  function formatTime(iso) {
+    return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+
   return (
     <div className={`chat-panel ${open ? 'open' : 'collapsed'}`}>
-      <button className="chat-toggle" onClick={() => setOpen((o) => !o)}>
+      <button className="chat-toggle" onClick={toggleOpen}>
         {open ? 'Close chat' : 'Chat'}
+        {!open && unreadCount ? <span className="chat-unread-badge">{unreadCount > 99 ? '99+' : unreadCount}</span> : null}
       </button>
       {open ? (
         !isSupabaseConfigured ? (
@@ -226,32 +259,26 @@ export default function ChatPanel({ myName, onRequestJoin }) {
                 const online = onlineByName.get(f.followed_name_lower)
                 return (
                   <div key={f.followed_name_lower} className="chat-contact-row">
-                    <span className={`chat-status-dot chat-status-${statusColor(online)}`} title={statusColor(online)} />
+                    <span className={`chat-status-dot chat-status-${statusColor(online)}`} />
                     <span>{f.followed_display_name}</span>
+                    <span className="chat-status-label">{statusLabel(online)}</span>
                     {online?.room_code ? (
-                      <>
-                        {MODE_CONFIG[online.room_mode] ? <span className="chat-ingame-label">{MODE_CONFIG[online.room_mode].label}</span> : null}
-                        <button className="chat-join" onClick={() => onRequestJoin?.(online.room_code)} title="Join their room">Join</button>
-                      </>
+                      <button className="chat-join" onClick={() => onRequestJoin?.(online.room_code)} title="Join their room">Join</button>
                     ) : null}
                     <button className="chat-remove" onClick={() => removeFriend(f.followed_name_lower)} title="Remove friend">x</button>
                   </div>
                 )
               })}
               <div className="chat-section-title">Online</div>
-              {onlinePlayers.map((p) => (
+              {onlineNonFriends.map((p) => (
                 <div key={p.name_lower} className="chat-contact-row">
-                  <span className={`chat-status-dot chat-status-${statusColor(p)}`} title={statusColor(p)} />
+                  <span className={`chat-status-dot chat-status-${statusColor(p)}`} />
                   <span>{p.display_name}</span>
+                  <span className="chat-status-label">{statusLabel(p)}</span>
                   {p.room_code ? (
-                    <>
-                      {MODE_CONFIG[p.room_mode] ? <span className="chat-ingame-label">{MODE_CONFIG[p.room_mode].label}</span> : null}
-                      <button className="chat-join" onClick={() => onRequestJoin?.(p.room_code)} title="Join their room">Join</button>
-                    </>
+                    <button className="chat-join" onClick={() => onRequestJoin?.(p.room_code)} title="Join their room">Join</button>
                   ) : null}
-                  {acceptedLowerSet.has(p.name_lower) ? (
-                    <span className="chat-following">friends</span>
-                  ) : pendingSentSet.has(p.name_lower) ? (
+                  {pendingSentSet.has(p.name_lower) ? (
                     <span className="chat-following">requested</span>
                   ) : (
                     <button onClick={() => requestFriend(p.name_lower, p.display_name)}>+ add</button>
@@ -263,7 +290,10 @@ export default function ChatPanel({ myName, onRequestJoin }) {
               <div className="chat-messages">
                 {messages.map((m) => (
                   <div key={m.id} className="chat-message">
-                    <strong>{m.sender_display_name}</strong>
+                    <div className="chat-message-head">
+                      <strong>{m.sender_display_name}</strong>
+                      <span className="chat-message-time">{formatTime(m.created_at)}</span>
+                    </div>
                     <span>{m.body}</span>
                   </div>
                 ))}
