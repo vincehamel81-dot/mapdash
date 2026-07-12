@@ -727,6 +727,18 @@ export function signedAngleBetween(a, b) {
 // facing, pick whichever real candidate points closest to a fixed compass direction (whatever W/
 // A/S/D means there) regardless of current heading - by direct request, since the rotating-map
 // mode's "turn relative to facing" model is deliberately NOT what that mode wants.
+// When going straight (no explicit turn signal), a candidate sharing the CURRENT street's name is
+// preferred over a smaller-angle-but-differently-named one, as long as it's still within this many
+// degrees of "plausibly straight ahead" - real streets are rarely perfectly straight through an
+// intersection, and without this a shallow-merging side street or ramp can steal a "just continue"
+// press away from the road the player is already on purely because its local departure angle
+// happens to be a few degrees smaller. Confirmed via findRiskyIntersections against the real
+// dataset (18 real intersections, mostly highway on/off-ramps) and two live-reported cases (Rue
+// Dalhousie-adjacent, Côte d'Abraham) where holding straight wrongly diverted off the current
+// street. Matches findRiskyIntersections' own threshold so the detector and the actual in-game
+// behavior agree on what counts as "plausibly straight".
+const SAME_STREET_CONTINUE_MAX_ANGLE_DEG = 40
+
 export function chooseNextSegment(graph, nodeKey, currentEdge, currentHeadingDeg, turnPreference = 'straight', absoluteTargetDeg = null) {
   const node = graph.nodes.get(nodeKey)
   if (!node) return null
@@ -758,10 +770,18 @@ export function chooseNextSegment(graph, nodeKey, currentEdge, currentHeadingDeg
     } else if (turnPreference === 'right') {
       const right = choices.filter((choice) => choice.angleDelta < -10)
       filtered = right.length ? right : choices
+    } else if (currentEdge.name) {
+      const sameStreet = choices
+        .filter((choice) => choice.edge.name === currentEdge.name)
+        .sort((a, b) => a.absAngle - b.absAngle)[0]
+      if (sameStreet && sameStreet.absAngle <= SAME_STREET_CONTINUE_MAX_ANGLE_DEG) {
+        filtered = [sameStreet]
+      }
     }
   }
   // In absolute mode, angleDelta is already measured against the fixed compass target, so sorting
-  // by absAngle alone picks whichever real street points closest to it - no left/right filtering.
+  // by absAngle alone picks whichever real street points closest to it - no left/right filtering,
+  // and no same-street preference either (an explicit compass command should win outright).
 
   filtered.sort((a, b) => a.absAngle - b.absAngle)
   return filtered[0]?.edge || choices[0]?.edge || null

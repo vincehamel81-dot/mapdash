@@ -1544,6 +1544,11 @@ export default function App({ playerName, renameName, joinRequest }) {
   useEffect(() => {
     if (!currentRoom || !isRoomHost) return
     if (currentRoom.status === 'finished' && MODE_CONFIG[currentRoom.mode]?.hostGatedStart) {
+      // TODO(debug): a live report of a freshly created room disappearing ~3s later matches this
+      // timer's duration closely enough to be worth ruling in/out - logging until confirmed either
+      // way. A brand new room should never have status 'finished', so this firing right after
+      // creation would itself be the bug.
+      console.warn('[auto-restart] room', currentRoom.code, 'is finished, restarting in 3s. players:', currentRoom.players.length)
       startCountdown(3, () => {
         restartImmediate()
       })
@@ -1727,23 +1732,39 @@ export default function App({ playerName, renameName, joinRequest }) {
 
   // Host-only: adds one ambient NPC driver to the room roster. Reads roomsRef (not the closed-over
   // `currentRoom`) for the same reason createRoom/joinRoom do - see their comments above.
+  // TODO(debug): a live report said clicking this sometimes appears to "close the menu" and, once,
+  // a freshly created room seemed to disappear ~3s later - neither reproduced via code reading
+  // alone, so this is wrapped defensively and logs every step until it's caught red-handed in the
+  // console. Safe to strip once confirmed fixed or confirmed to never actually throw.
   const addNpc = useCallback(() => {
-    if (!joinedRoomCode) return
-    const room = roomsRef.current.find((r) => r.code === joinedRoomCode)
-    if (!room || room.host !== name) return
-    if (room.players.length >= room.maxPlayers) {
-      alert('This room is full.')
-      return
+    try {
+      if (!joinedRoomCode) return
+      const room = roomsRef.current.find((r) => r.code === joinedRoomCode)
+      if (!room) {
+        console.warn('[addNpc] no room found for', joinedRoomCode)
+        return
+      }
+      if (room.host !== name) {
+        console.warn('[addNpc] not host - room.host =', room.host, 'me =', name)
+        return
+      }
+      if (room.players.length >= room.maxPlayers) {
+        alert('This room is full.')
+        return
+      }
+      const newNpc = {
+        name: pickNpcName(room.players.map((p) => p.name)),
+        color: CAR_COLORS[Math.floor(Math.random() * CAR_COLORS.length)],
+        avatarId: AVATAR_ICONS[Math.floor(Math.random() * AVATAR_ICONS.length)].id,
+        eliminated: false,
+        isNpc: true
+      }
+      const nextRoom = { ...room, players: [...room.players, newNpc] }
+      console.log('[addNpc] adding', newNpc.name, '- room will have', nextRoom.players.length, 'players')
+      setRooms(roomsRef.current.map((r) => (r.code === joinedRoomCode ? nextRoom : r)))
+    } catch (err) {
+      console.error('[addNpc] threw:', err)
     }
-    const newNpc = {
-      name: pickNpcName(room.players.map((p) => p.name)),
-      color: CAR_COLORS[Math.floor(Math.random() * CAR_COLORS.length)],
-      avatarId: AVATAR_ICONS[Math.floor(Math.random() * AVATAR_ICONS.length)].id,
-      eliminated: false,
-      isNpc: true
-    }
-    const nextRoom = { ...room, players: [...room.players, newNpc] }
-    setRooms(roomsRef.current.map((r) => (r.code === joinedRoomCode ? nextRoom : r)))
   }, [joinedRoomCode, name, setRooms, roomsRef])
 
   const removeNpc = useCallback(
@@ -2115,14 +2136,24 @@ export default function App({ playerName, renameName, joinRequest }) {
                     {rooms.filter((room) => room.mode === mode && room.status !== 'closed' && !isRoomStale(room)).length ? (
                       rooms
                         .filter((room) => room.mode === mode && room.status !== 'closed' && !isRoomStale(room))
-                        .map((room) => (
-                          <div key={room.code} className="room-item">
-                            <div>
-                              <strong>{room.code}</strong> · {room.players.length}/{room.maxPlayers}
+                        .map((room) => {
+                          const inProgress = MODE_CONFIG[room.mode]?.hostGatedStart && room.status === 'playing'
+                          const full = room.players.length >= room.maxPlayers
+                          const unjoinable = inProgress || full
+                          return (
+                            <div key={room.code} className="room-item">
+                              <div>
+                                <strong>{room.code}</strong> · {room.players.length}/{room.maxPlayers}
+                              </div>
+                              <button
+                                disabled={unjoinable}
+                                onClick={() => { setRoomCode(room.code); joinRoom(room.code) }}
+                              >
+                                {inProgress ? 'In-game' : full ? 'Full' : 'Join'}
+                              </button>
                             </div>
-                            <button onClick={() => { setRoomCode(room.code); joinRoom(room.code) }}>Join</button>
-                          </div>
-                        ))
+                          )
+                        })
                     ) : (
                       <div className="room-empty">No rooms available yet.</div>
                     )}

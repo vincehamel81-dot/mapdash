@@ -74,8 +74,10 @@ if (missingConnections.length > 30) console.log(`  ...and ${missingConnections.l
 // --- Issue 2: wrong-turn intersections ----------------------------------------------------------
 
 const risky = findRiskyIntersections(graph)
-console.log(`\nISSUE 2 - Wrong-turn intersections: ${risky.length} spots where going straight can wrongly divert you onto a different street.`)
-console.log('(This is the "pressed W, it turned me onto a ramp/side street anyway" bug.)\n')
+console.log(`\nISSUE 2 - Wrong-turn intersections (raw geometry, pre-mitigation): ${risky.length} spots where the smallest-angle candidate isn't the same street.`)
+console.log('chooseNextSegment now prefers a same-named continuation within 40deg over a smaller-angle')
+console.log('stranger, so these should no longer actually misturn in-game - this list is a lower bound')
+console.log('on where that mitigation is doing real work, not a live bug list anymore.\n')
 for (const r of risky) {
   console.log(`  On "${r.streetName}", going straight can wrongly divert onto "${r.divertsToName}"  [${r.coord[0].toFixed(5)}, ${r.coord[1].toFixed(5)}]`)
 }

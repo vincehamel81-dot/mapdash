@@ -175,10 +175,12 @@ export default function NameGate({ children }) {
           <label htmlFor="name-gate-input">Enter your name</label>
           <input
             id="name-gate-input"
+            name="display-name"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Your name"
             autoFocus
+            autoComplete="off"
             maxLength={20}
           />
           {error ? <div className="name-gate-error">{error}</div> : null}
