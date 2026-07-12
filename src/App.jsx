@@ -592,7 +592,16 @@ export default function App({ playerName, renameName, joinRequest }) {
   useEffect(() => {
     if (!currentRoom) return
     const shouldBeStarted = currentRoom.status === 'playing' && !currentRoom.players.find((p) => p.name === name)?.eliminated
-    setStarted((prev) => (prev === shouldBeStarted ? prev : shouldBeStarted))
+    setStarted((prev) => {
+      if (prev === shouldBeStarted) return prev
+      // TODO(debug): a live report of getting kicked back to the setup screen every ~3s hasn't
+      // been reproduced via code reading - logging every actual flip here (the most direct
+      // mechanism that would produce that symptom) until it's caught in the console.
+      if (prev && !shouldBeStarted) {
+        console.warn('[started] flipping to FALSE - room status:', currentRoom.status, 'me in room:', currentRoom.players.find((p) => p.name === name), 'all players:', currentRoom.players.map((p) => `${p.name}(${p.eliminated ? 'elim' : 'alive'}${p.isNpc ? ',npc' : ''})`))
+      }
+      return shouldBeStarted
+    })
   }, [currentRoom, name])
 
   const currentPlayer = useMemo(

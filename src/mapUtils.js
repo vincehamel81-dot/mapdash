@@ -537,6 +537,121 @@ function snapDanglingEndpoints(rawNodes, edges, toleranceMeters) {
   }
 }
 
+// The gap neither splitCrossingEdges nor snapDanglingEndpoints covers: two DIFFERENT streets each
+// have an INTERIOR polyline vertex (not either street's own endpoint) sitting a few meters from
+// the other street's line, without the lines actually crossing (so it's not a true X-intersection)
+// and without either vertex being a dangling dead-end (so snapDanglingEndpoints never looks at it).
+// Confirmed against real reported cases (Rue Ferland / Rue Couillard) via direct data tracing: both
+// streets place a vertex at what a human would call "the intersection", just not close enough to
+// literally coincide - a very common shape for real-world street-network extractions where each
+// street was digitized independently. Tolerance is intentionally tighter than
+// INTERSECTION_SNAP_TOLERANCE_METERS since this pass considers every interior vertex of every edge
+// (not just already-dangling ones), so a looser tolerance risks false connections between distinct
+// parallel streets that merely run close together without truly meeting.
+const VERTEX_PROXIMITY_TOLERANCE_METERS = 10
+
+function connectInteriorVertices(rawNodes, edges, toleranceMeters) {
+  const edgeList = Array.from(edges.values())
+  if (!edgeList.length) return
+
+  const refLat = edgeList[0].polyline[0][0]
+  const cellSize = Math.max(toleranceMeters * 2, VERTEX_GRID_CELL_METERS)
+  const grid = buildVertexGrid(edgeList, refLat, cellSize)
+
+  const cutsByEdge = new Map() // edgeId -> [{ distanceAlong, nodeKey }]
+  const seenPairs = new Set()
+
+  for (const edge of edgeList) {
+    let accumulated = 0
+    for (let i = 0; i < edge.polyline.length; i++) {
+      if (i > 0) accumulated += haversine(edge.polyline[i - 1], edge.polyline[i])
+      // Only interior vertices - the polyline's own first/last point IS already a real node,
+      // already handled by mergeNearbyNodes/snapDanglingEndpoints.
+      if (i === 0 || i === edge.polyline.length - 1) continue
+
+      const vertex = edge.polyline[i]
+      const candidates = nearbyEdgesFromGrid(grid, vertex, refLat, cellSize).filter((e) => e.id !== edge.id)
+      let best = null
+      for (const candidate of candidates) {
+        const result = pointToSegmentDistance(vertex, candidate.polyline)
+        if (result.distance <= toleranceMeters && (!best || result.distance < best.result.distance)) {
+          best = { candidate, result }
+        }
+      }
+      if (!best) continue
+
+      const { candidate, result } = best
+      const pairKey = `${edge.id}#${i}#${candidate.id}`
+      if (seenPairs.has(pairKey)) continue
+      seenPairs.add(pairKey)
+
+      const nearCandidateStart = result.segmentIndex === 0 && result.t <= 1e-6
+      const nearCandidateEnd = result.segmentIndex === candidate.polyline.length - 2 && result.t >= 1 - 1e-6
+      const nodeKey = nearCandidateStart ? candidate.startKey : nearCandidateEnd ? candidate.endKey : roundCoord(vertex)
+
+      if (!cutsByEdge.has(edge.id)) cutsByEdge.set(edge.id, [])
+      cutsByEdge.get(edge.id).push({ distanceAlong: accumulated, nodeKey })
+
+      // If the close point on the candidate is itself mid-polyline (not the candidate's own
+      // endpoint), the candidate needs splitting too so both streets share the new node - an
+      // endpoint match instead just reuses the node that already exists there.
+      if (!nearCandidateStart && !nearCandidateEnd) {
+        if (!cutsByEdge.has(candidate.id)) cutsByEdge.set(candidate.id, [])
+        cutsByEdge.get(candidate.id).push({ distanceAlong: result.distanceAlong, nodeKey })
+      }
+    }
+  }
+
+  // Apply cuts - same split-and-rewire shape as splitCrossingEdges/snapDanglingEndpoints above.
+  for (const [edgeId, rawCuts] of cutsByEdge) {
+    const edge = edges.get(edgeId)
+    if (!edge) continue
+
+    const sorted = rawCuts.slice().sort((a, b) => a.distanceAlong - b.distanceAlong)
+    const deduped = []
+    for (const cut of sorted) {
+      const last = deduped[deduped.length - 1]
+      if (last && Math.abs(cut.distanceAlong - last.distanceAlong) < 1) continue
+      if (cut.distanceAlong <= 1 || cut.distanceAlong >= edge.lengthMeters - 1) continue
+      deduped.push(cut)
+    }
+    if (!deduped.length) continue
+
+    const pieces = splitPolylineAtDistances(edge.polyline, deduped.map((c) => c.distanceAlong))
+    if (pieces.length < 2) continue
+
+    edges.delete(edgeId)
+    const newEdges = pieces.map((piece, i) => packageSegment({ ...edge, id: `${edgeId}~v${i}`, polyline: piece }))
+    newEdges[0].startKey = edge.startKey
+    newEdges[newEdges.length - 1].endKey = edge.endKey
+    deduped.forEach((cut, i) => {
+      newEdges[i].endKey = cut.nodeKey
+      newEdges[i + 1].startKey = cut.nodeKey
+    })
+    newEdges.forEach((e) => edges.set(e.id, e))
+
+    const startNode = rawNodes.get(edge.startKey)
+    const endNode = rawNodes.get(edge.endKey)
+    if (startNode) {
+      const idx = startNode.edges.indexOf(edge)
+      if (idx !== -1) startNode.edges[idx] = newEdges[0]
+    }
+    if (endNode) {
+      const idx = endNode.edges.indexOf(edge)
+      if (idx !== -1) endNode.edges[idx] = newEdges[newEdges.length - 1]
+    }
+
+    deduped.forEach((cut, i) => {
+      if (!rawNodes.has(cut.nodeKey)) {
+        rawNodes.set(cut.nodeKey, { key: cut.nodeKey, coord: newEdges[i].polyline[newEdges[i].polyline.length - 1], edges: [] })
+      }
+      const node = rawNodes.get(cut.nodeKey)
+      if (!node.edges.includes(newEdges[i])) node.edges.push(newEdges[i])
+      if (!node.edges.includes(newEdges[i + 1])) node.edges.push(newEdges[i + 1])
+    })
+  }
+}
+
 export function buildGraph(segments, {
   toleranceMeters = DEFAULT_NODE_MERGE_TOLERANCE_METERS,
   dangleToleranceMeters = INTERSECTION_SNAP_TOLERANCE_METERS
@@ -564,6 +679,7 @@ export function buildGraph(segments, {
 
   splitCrossingEdges(rawNodes, edges)
   snapDanglingEndpoints(rawNodes, edges, dangleToleranceMeters)
+  connectInteriorVertices(rawNodes, edges, VERTEX_PROXIMITY_TOLERANCE_METERS)
 
   const nodes = mergeNearbyNodes(rawNodes, toleranceMeters)
 
