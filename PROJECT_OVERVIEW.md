@@ -87,11 +87,15 @@ Defined in `MODE_CONFIG` (`App.jsx`):
 | Mode | Room-based | Host-gated start | Min/Max players | Round length |
 |---|---|---|---|---|
 | Single | No | — | 1 | untimed |
-| Team | Yes | No (joining drops you straight in) | 2/4 | untimed |
-| Survival | Yes | Yes | 2/6 | 10 min |
-| Finder (Easy) | Yes | Yes | 2/6 | untimed (first to 10 wins) |
-| Finder (Hard) | Yes | Yes | 2/6 | untimed |
-| Tag | Yes | Yes | 2/6 | 5 min |
+| Team | Yes | No (joining drops you straight in) | 2/10 | untimed |
+| Survival | Yes | Yes | 2/10 | 10 min |
+| Finder (Easy) | Yes | Yes | 2/10 | untimed (first to 10 wins) |
+| Finder (Hard) | Yes | Yes | 2/10 | untimed |
+| Tag | Yes | Yes | 2/10 | 5 min |
+
+Max players raised from 4/6 to a uniform 10 across every room-based mode to make room for NPCs
+(see below) — this applies even in an all-human room, not just NPC-filled ones. NPCs count toward
+both `maxPlayers` and `minPlayers`, so a host can start a round solo-with-bots-for-company.
 
 - **Host-gated** modes stay `'waiting'` until the host explicitly clicks Start; joining mid-lobby
   is fine, joining mid-*round* is blocked with an alert.
@@ -319,15 +323,35 @@ testing**, not guessed:
 - **The core "streets I see but can't drive on" visual-clarity problem** described above under
   Navigation — not yet addressed at all, flagged as likely the highest-leverage remaining nav fix.
 
+## NPC/bot players (v1: ambient traffic)
+
+Host can click **+ Add NPC** in the room roster (any room-based mode, any time the room exists —
+not gated to instead of only before a round starts, since Team has no real lobby to gate on) to add
+a bot up to the room's capacity, now **10 for every room-based mode** (Single stays 1). Each NPC
+gets a random name (`src/npcNames.js`, ~300 entries, retried on collision with anyone already in the
+room), random color/avatar, and is stored in `room.players` alongside real players with an
+`isNpc: true` flag — the same roster, so it renders on the map exactly like another player once its
+position starts broadcasting, no separate rendering path needed.
+
+- **Movement**: real graph-based driving (`pickRandomNextSegment` in `mapUtils.js`) — picks a
+  uniformly random real candidate at every intersection, no pathfinding/goal-seeking. A true dead
+  end (rare) makes it bounce back the way it came instead of getting stuck.
+- **Host-only simulation**: only the room host's client runs the movement tick (`NPC_TICK_MS =
+  200`) for every NPC and broadcasts each one's position on the same ephemeral per-room Realtime
+  Broadcast channel a real player's own position uses — never persisted, matching the existing
+  live-position architecture exactly. If the host leaves and a new host is reassigned, NPCs
+  respawn at a fresh random position under the new host's simulation (no continuity across a host
+  handoff — an accepted v1 simplification).
+- **Deliberately ambient-only (v1 scope decision)**: NPCs do not affect win conditions. They can
+  never be picked as Tag's It (`resetPlayersForRound` filters them out), never count toward
+  Survival's health-based win tally, and never pick up Finder-Keeper items (nothing runs pickup
+  detection for them). They exist purely as visual traffic/company. Full mechanical participation
+  (taggable, item-seeking, damageable) is explicitly deferred, not yet built.
+- **Removal**: host can remove one via the "x" next to its name in the roster; also silently pruned
+  from the host's local simulation state the moment it's no longer in `room.players`.
+
 ## Deferred / backlog features
 
-- **NPC/bot players** (next up, explicit specs already gathered): host can add NPCs before a round
-  starts, mode-dependent, room capacity raised to 10 for all room-based modes (Single stays 1),
-  each NPC gets a random color/avatar/name drawn from a hardcoded ~200-name list. Confirmed
-  direction: NPCs should be *real simulated drivers* on the street graph (not scripted/decorative
-  outcomes) — a substantial feature (needs autonomous movement AI, room-state shape changes to
-  represent non-human players, and the host's client to simulate every NPC's position since there's
-  no real client behind them).
 - **Spectator mode**: watch a room without playing. A "Join" button (jump into a friend's open room
   from chat) shipped; spectating specifically was deferred.
 - **3D building extrusion**: satellite/aerial imagery shipped (Esri World Imagery + a first-person

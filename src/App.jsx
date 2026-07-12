@@ -21,8 +21,10 @@ import {
   offsetLatLng,
   haversine,
   pickRandomStreetPoint,
-  findRiskyIntersections
+  findRiskyIntersections,
+  pickRandomNextSegment
 } from './mapUtils'
+import { pickNpcName } from './npcNames'
 import './App.css'
 
 const CAR_COLORS = ['#4285F4', '#DB4437', '#F4B400', '#0F9D58', '#9C27B0', '#FF6D00', '#202124']
@@ -54,12 +56,18 @@ const DEBUG_ROUND_MS = (() => {
 
 export const MODE_CONFIG = {
   single: { label: 'Single', roomBased: false, hostGatedStart: false, minPlayers: 1, maxPlayers: 1, roundDurationMs: null },
-  team: { label: 'Team', roomBased: true, hostGatedStart: false, minPlayers: 2, maxPlayers: 4, roundDurationMs: null },
-  survival: { label: 'Survival', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 6, roundDurationMs: DEBUG_ROUND_MS ?? 10 * 60 * 1000 },
-  'finder-easy': { label: 'Finder (Easy)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 6, roundDurationMs: null },
-  'finder-hard': { label: 'Finder (Hard)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 6, roundDurationMs: null },
-  tag: { label: 'Tag', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 6, roundDurationMs: DEBUG_ROUND_MS ?? 5 * 60 * 1000 }
+  team: { label: 'Team', roomBased: true, hostGatedStart: false, minPlayers: 2, maxPlayers: 10, roundDurationMs: null },
+  survival: { label: 'Survival', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: DEBUG_ROUND_MS ?? 10 * 60 * 1000 },
+  'finder-easy': { label: 'Finder (Easy)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: null },
+  'finder-hard': { label: 'Finder (Hard)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: null },
+  tag: { label: 'Tag', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: DEBUG_ROUND_MS ?? 5 * 60 * 1000 }
 }
+
+// Ambient NPC drivers (v1): real simulated movement on the street graph (see
+// pickRandomNextSegment), but deliberately don't affect win conditions - can't be tagged/become
+// It, can't find items, don't take damage. Host's client alone simulates + broadcasts every NPC's
+// position, same ephemeral broadcast channel as a real player's own position (never persisted).
+const NPC_TICK_MS = 200
 
 const CLOUD_DAMAGE_PER_SEC = { white: 30, gray: 100, black: 250 }
 const FINDER_PICKUP_RADIUS_METERS = 15
@@ -89,7 +97,10 @@ function resetPlayersForRound(players, mode) {
     return { players: next.map((p) => ({ ...p, foundItems: [] })), itName }
   }
   if (mode === 'tag') {
-    itName = next[Math.floor(Math.random() * next.length)]?.name ?? null
+    // NPCs are ambient-only (v1) - they can't chase or be caught, so picking one as It would
+    // leave the round with no way to win. Only real players are eligible.
+    const eligible = next.filter((p) => !p.isNpc)
+    itName = eligible[Math.floor(Math.random() * eligible.length)]?.name ?? null
     return { players: next.map((p) => ({ ...p, isIt: p.name === itName })), itName }
   }
   return { players: next, itName }
@@ -706,6 +717,10 @@ export default function App({ playerName, renameName, joinRequest }) {
   const movementRef = useRef({ distanceAlong: 0, direction: 1 })
   const animationRef = useRef(null)
   const pendingTurnRef = useRef(null)
+  // Host-only local simulation state for every ambient NPC currently in the room: name ->
+  // { edgeId, distanceAlong, direction }. Never persisted or broadcast itself - only the resulting
+  // lat/lng gets broadcast (see the NPC tick effect below), same as a real player's own position.
+  const npcSimRef = useRef({})
   // Always holds the freshest leaveRoom (synced by an effect right after it's declared below) -
   // quitGame calls through this instead of leaveRoom directly, since a real bug was traced to
   // exactly this staleness: quitGame's own deps deliberately exclude leaveRoom (it's declared
@@ -1485,7 +1500,9 @@ export default function App({ playerName, renameName, joinRequest }) {
       if (Date.now() - currentRoom.roundStartedAt < durationMs) return
       const live = liveRef.current
       const finalHealth = {}
-      for (const p of currentRoom.players) {
+      // NPCs are ambient-only (v1) - they never take damage, so including them here would let a
+      // bot sitting at full health "win" Survival by default every time.
+      for (const p of currentRoom.players.filter((p) => !p.isNpc)) {
         finalHealth[p.name] = p.name === name ? healthRef.current : live.livePositions[p.name]?.health ?? p.health ?? 0
       }
       const maxHealth = Math.max(...Object.values(finalHealth))
@@ -1493,7 +1510,7 @@ export default function App({ playerName, renameName, joinRequest }) {
         ...room,
         status: 'finished',
         winners: room.players.filter((p) => finalHealth[p.name] === maxHealth).map((p) => p.name),
-        players: room.players.map((p) => ({ ...p, health: finalHealth[p.name] }))
+        players: room.players.map((p) => (p.isNpc ? p : { ...p, health: finalHealth[p.name] }))
       }))
     }, 1000)
     return () => window.clearInterval(interval)
@@ -1503,7 +1520,9 @@ export default function App({ playerName, renameName, joinRequest }) {
   // 5-minute mark passes first ("It lost", every still-alive non-It player wins).
   useEffect(() => {
     if (!isRoomHost || currentRoom?.mode !== 'tag' || currentRoom.status !== 'playing' || !currentRoom.roundStartedAt) return
-    const others = currentRoom.players.filter((p) => p.name !== currentRoom.itName)
+    // NPCs are ambient-only (v1) and never eligible to be It (see resetPlayersForRound), so they're
+    // excluded here too - an ambient bot just wandering around shouldn't count as a "survivor".
+    const others = currentRoom.players.filter((p) => p.name !== currentRoom.itName && !p.isNpc)
     if (others.length && others.every((p) => p.eliminated)) {
       updateRoom(currentRoom.code, (room) => (room.status === 'finished' ? room : { ...room, status: 'finished', winners: [room.itName] }))
       return
@@ -1513,7 +1532,7 @@ export default function App({ playerName, renameName, joinRequest }) {
       if (Date.now() - currentRoom.roundStartedAt < durationMs) return
       updateRoom(currentRoom.code, (room) => {
         if (room.status === 'finished') return room
-        const survivors = room.players.filter((p) => p.name !== room.itName && !p.eliminated)
+        const survivors = room.players.filter((p) => p.name !== room.itName && !p.eliminated && !p.isNpc)
         return { ...room, status: 'finished', winners: survivors.map((p) => p.name) }
       })
     }, 1000)
@@ -1706,6 +1725,111 @@ export default function App({ playerName, renameName, joinRequest }) {
     [roomCode, selectedColor, selectedAvatarId, name, currentPlayer, setRooms, roomsRef]
   )
 
+  // Host-only: adds one ambient NPC driver to the room roster. Reads roomsRef (not the closed-over
+  // `currentRoom`) for the same reason createRoom/joinRoom do - see their comments above.
+  const addNpc = useCallback(() => {
+    if (!joinedRoomCode) return
+    const room = roomsRef.current.find((r) => r.code === joinedRoomCode)
+    if (!room || room.host !== name) return
+    if (room.players.length >= room.maxPlayers) {
+      alert('This room is full.')
+      return
+    }
+    const newNpc = {
+      name: pickNpcName(room.players.map((p) => p.name)),
+      color: CAR_COLORS[Math.floor(Math.random() * CAR_COLORS.length)],
+      avatarId: AVATAR_ICONS[Math.floor(Math.random() * AVATAR_ICONS.length)].id,
+      eliminated: false,
+      isNpc: true
+    }
+    const nextRoom = { ...room, players: [...room.players, newNpc] }
+    setRooms(roomsRef.current.map((r) => (r.code === joinedRoomCode ? nextRoom : r)))
+  }, [joinedRoomCode, name, setRooms, roomsRef])
+
+  const removeNpc = useCallback(
+    (npcName) => {
+      if (!joinedRoomCode) return
+      const room = roomsRef.current.find((r) => r.code === joinedRoomCode)
+      if (!room || room.host !== name) return
+      const nextRoom = { ...room, players: room.players.filter((p) => p.name !== npcName) }
+      setRooms(roomsRef.current.map((r) => (r.code === joinedRoomCode ? nextRoom : r)))
+      delete npcSimRef.current[npcName]
+      setLivePositions((prev) => {
+        if (!(npcName in prev)) return prev
+        const next = { ...prev }
+        delete next[npcName]
+        return next
+      })
+    },
+    [joinedRoomCode, name, setRooms, roomsRef]
+  )
+
+  // Host-only ambient NPC movement (v1: real graph-based driving, random turn at every
+  // intersection, no effect on scoring - see the mode-config/win-condition NPC exclusions above).
+  // Reads the room roster from liveRef (not the closed-over `currentRoom`) so this effect doesn't
+  // need to restart on every room update - same pattern the movement/cloud-spawn loops already use.
+  useEffect(() => {
+    if (!isRoomHost || !joinedRoomCode || !graph) return
+    const interval = window.setInterval(() => {
+      const room = liveRef.current.currentRoom
+      if (!room) return
+      const npcs = room.players.filter((p) => p.isNpc)
+      const activeNames = new Set(npcs.map((p) => p.name))
+      for (const key of Object.keys(npcSimRef.current)) {
+        if (!activeNames.has(key)) delete npcSimRef.current[key]
+      }
+      if (!npcs.length) return
+
+      const dt = NPC_TICK_MS / 1000
+      for (const npc of npcs) {
+        let sim = npcSimRef.current[npc.name]
+        if (!sim) {
+          const edges = Array.from(graph.edges.values())
+          if (!edges.length) continue
+          const edge = edges[Math.floor(Math.random() * edges.length)]
+          sim = { edgeId: edge.id, distanceAlong: Math.random() * edge.lengthMeters, direction: Math.random() < 0.5 ? 1 : -1 }
+        }
+        const edge = graph.edges.get(sim.edgeId)
+        if (!edge) {
+          delete npcSimRef.current[npc.name]
+          continue
+        }
+
+        const metersPerSecond = (edge.speedKmh * 2) / 3.6
+        let nextDistanceAlong = sim.distanceAlong + metersPerSecond * dt * sim.direction
+        let nextDirection = sim.direction
+        let nextEdge = edge
+
+        const overflowing = sim.direction === 1 ? nextDistanceAlong > edge.lengthMeters : nextDistanceAlong < 0
+        if (overflowing) {
+          const remainder = sim.direction === 1 ? nextDistanceAlong - edge.lengthMeters : -nextDistanceAlong
+          const exitNodeKey = sim.direction === 1 ? edge.endKey : edge.startKey
+          const picked = pickRandomNextSegment(graph, exitNodeKey, edge)
+          if (picked) {
+            nextEdge = picked
+            const entry = resolveEdgeEntry(picked, exitNodeKey, remainder)
+            nextDistanceAlong = entry.distanceAlong
+            nextDirection = entry.direction
+          } else {
+            // True dead end (rare) - bounce back the way it came rather than getting stuck.
+            nextDistanceAlong = sim.direction === 1 ? edge.lengthMeters : 0
+            nextDirection = -sim.direction
+          }
+        }
+
+        npcSimRef.current[npc.name] = { edgeId: nextEdge.id, distanceAlong: nextDistanceAlong, direction: nextDirection }
+        const [lat, lng] = getSegmentPosition(nextEdge, nextDistanceAlong)
+        const payload = { name: npc.name, lat, lng }
+        // Broadcast for every other client, and update this (the host's) own local view directly -
+        // Realtime broadcast channels don't echo back to the sender by default, and NPCs have no
+        // other rendering path (unlike the host's own car, which renders straight from local state).
+        roomChannelRef.current?.send({ type: 'broadcast', event: 'position', payload })
+        setLivePositions((prev) => ({ ...prev, [npc.name]: payload }))
+      }
+    }, NPC_TICK_MS)
+    return () => window.clearInterval(interval)
+  }, [isRoomHost, joinedRoomCode, graph])
+
   // "Join" from ChatPanel: App and ChatPanel are sibling components with no shared state, so
   // main.jsx lifts one small piece of cross-component command state - `joinRequest` - and this
   // effect just forwards it into the existing joinRoom flow (which already applies every normal
@@ -1841,7 +1965,19 @@ export default function App({ playerName, renameName, joinRequest }) {
         </div>
       </div>
       <div className="room-player-list">
-        <div className="room-player-title">Players</div>
+        <div className="room-player-title">
+          Players
+          {isRoomHost ? (
+            <button
+              className="room-meta-btn"
+              onClick={addNpc}
+              disabled={currentRoom.players.length >= currentRoom.maxPlayers}
+              title={currentRoom.players.length >= currentRoom.maxPlayers ? 'Room is full' : 'Add an ambient NPC driver'}
+            >
+              + Add NPC
+            </button>
+          ) : null}
+        </div>
         {currentRoom.players.map((player) => {
           const isSelf = player.name === name
           const live = livePositions[player.name]
@@ -1849,9 +1985,12 @@ export default function App({ playerName, renameName, joinRequest }) {
             <div key={player.name} className="room-player-item">
               <span style={{ color: player.color }}>
                 {player.name}
+                {player.isNpc ? ' (Bot)' : ''}
                 {currentRoom.itName === player.name ? ' (It)' : ''}
               </span>
-              {currentRoom.mode === 'survival' ? (
+              {player.isNpc ? (
+                isRoomHost ? <button className="room-meta-btn" onClick={() => removeNpc(player.name)} title="Remove NPC">x</button> : null
+              ) : currentRoom.mode === 'survival' ? (
                 <span className="player-status active">{Math.round(isSelf ? health : live?.health ?? player.health ?? 1000)} HP</span>
               ) : currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard' ? (
                 <span className="player-status active">{isSelf ? (player.foundItems || []).length : live?.foundCount ?? 0}/{FINDER_ITEMS.length}</span>

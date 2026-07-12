@@ -169,6 +169,10 @@
   font-size: 0.95rem;
   color: #5f6368;
   font-weight: 700;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
 }
 
 .room-meta {

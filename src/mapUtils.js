@@ -849,6 +849,18 @@ export function findRiskyIntersections(graph, { sameNameMaxAngleDeg = 40 } = {})
   return risky
 }
 
+// NPC driving (ambient traffic, ~v1): picks a uniformly random real candidate at the intersection,
+// deliberately NOT angle-scored like chooseNextSegment - a bot doesn't have a heading preference to
+// honor, it just needs to keep moving somewhere real. Kept separate from chooseNextSegment so this
+// never affects real-player turn logic.
+export function pickRandomNextSegment(graph, nodeKey, currentEdge) {
+  const node = graph.nodes.get(nodeKey)
+  if (!node) return null
+  const choices = node.edges.filter((edge) => edge.id !== currentEdge.id)
+  if (!choices.length) return null
+  return choices[Math.floor(Math.random() * choices.length)]
+}
+
 // Resolve where the car ends up on `edge` when entering it at `entryNodeKey` after
 // traveling `remainder` meters past the end of the previous segment. Segments store an
 // arbitrary polyline direction (unrelated to travel direction), so entering at the edge's
