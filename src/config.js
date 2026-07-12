@@ -1,16 +1,16 @@
 export const CONFIG = {
-  // South edge pulled up again, this time checked against the real data rather than eyeballed:
-  // a direct scan of segments.json found the southernmost city==='Québec'-tagged point right at
-  // the old-town/riverfront longitude band (-71.195 to -71.225) sits at lat 46.7936 - anything
-  // south of there in that band is the St. Lawrence itself or Lévis on the far shore. South is now
-  // 46.8000, a comfortable ~1.5km north of that measured point, instead of a guessed value. North/
-  // west/east unchanged. Some real Quebec City streets near the old edges now fall outside this
-  // and are filtered out - accepted tradeoff, not a bug.
+  // Turns out shrinking this repeatedly was chasing the wrong lever: this bbox only ever filtered
+  // which STREET DATA loads - it never actually stopped the camera from panning/zooming out far
+  // enough to reveal real neighbouring places (Lévis, Île d'Orléans) on the base map tiles. That's
+  // now fixed properly with maxBounds on the map itself (see MapView.jsx), which is the real fix.
+  // Tightened a bit further here too, pulled in from the west (a multi-slice scan of the real data
+  // found legitimate Québec-tagged streets extend much further south around -71.30, likely
+  // Sainte-Foy - sacrificed to keep the box centered tighter on downtown).
   bbox: {
-    south: 46.8000,
-    west: -71.3007,
-    north: 46.8800,
-    east: -71.1158
+    south: 46.8050,
+    west: -71.2600,
+    north: 46.8700,
+    east: -71.1400
   },
   defaultZoom: 15,
   minZoom: 12,

@@ -30,7 +30,7 @@ export default function ChatPanel({ myName, onRequestJoin }) {
     const fetchOnline = () =>
       supabase
         .from('online_players')
-        .select('name_lower, display_name, room_code, room_mode, last_seen')
+        .select('name_lower, display_name, room_code, room_mode, room_status, last_seen')
         .neq('name_lower', myNameLower)
         .gte('last_seen', new Date(Date.now() - ONLINE_STALE_MS).toISOString())
 
@@ -65,6 +65,18 @@ export default function ChatPanel({ myName, onRequestJoin }) {
   useEffect(() => {
     refreshFriends()
   }, [refreshFriends])
+
+  // The friends table had no realtime subscription at all - refreshFriends only ever ran once on
+  // mount plus after this client's own add/remove calls, so anything that changed it from
+  // elsewhere (another tab, a future feature) would silently never show up without a page reload.
+  useEffect(() => {
+    if (!isSupabaseConfigured) return
+    const channel = supabase
+      .channel(`friends-${myNameLower}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'friends', filter: `follower_name_lower=eq.${myNameLower}` }, refreshFriends)
+      .subscribe()
+    return () => supabase.removeChannel(channel)
+  }, [myNameLower, refreshFriends])
 
   const addFriend = useCallback((nameLower, displayName) => {
     if (!isSupabaseConfigured) return
@@ -136,6 +148,15 @@ export default function ChatPanel({ myName, onRequestJoin }) {
   const friendLowerSet = useMemo(() => new Set(friends.map((f) => f.followed_name_lower)), [friends])
   const onlineByName = useMemo(() => new Map(onlinePlayers.map((p) => [p.name_lower, p])), [onlinePlayers])
 
+  // green = actively playing a round, yellow = online (in a room's lobby or just browsing), red =
+  // not online at all. `online` is undefined for a friend who isn't in the (already
+  // staleness-filtered) onlinePlayers list.
+  function statusColor(online) {
+    if (!online) return 'red'
+    if (online.room_code && online.room_status === 'playing') return 'green'
+    return 'yellow'
+  }
+
   return (
     <div className={`chat-panel ${open ? 'open' : 'collapsed'}`}>
       <button className="chat-toggle" onClick={() => setOpen((o) => !o)}>
@@ -153,7 +174,7 @@ export default function ChatPanel({ myName, onRequestJoin }) {
                 const online = onlineByName.get(f.followed_name_lower)
                 return (
                   <div key={f.followed_name_lower} className="chat-contact-row">
-                    {online?.room_code ? <span className="chat-ingame-dot" title="In a game" /> : null}
+                    <span className={`chat-status-dot chat-status-${statusColor(online)}`} title={statusColor(online)} />
                     <button className={selected === f.followed_name_lower ? 'selected' : ''} onClick={() => setSelected(f.followed_name_lower)}>
                       {f.followed_display_name}
                     </button>
@@ -170,7 +191,7 @@ export default function ChatPanel({ myName, onRequestJoin }) {
               <div className="chat-section-title">Online</div>
               {onlinePlayers.map((p) => (
                 <div key={p.name_lower} className="chat-contact-row">
-                  {p.room_code ? <span className="chat-ingame-dot" title="In a game" /> : null}
+                  <span className={`chat-status-dot chat-status-${statusColor(p)}`} title={statusColor(p)} />
                   <span>{p.display_name}</span>
                   {p.room_code ? (
                     <>

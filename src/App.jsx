@@ -281,9 +281,10 @@ function useDrivingControls(started, onControlsChange, onZoomChange, onReverseTa
   }, [started, onControlsChange, onZoomChange, onReverseTap])
 }
 
-function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh, turboActive, compassRef }) {
+function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh, turboActive, compassRef, gameMessage }) {
   return (
     <div className="screen-overlay">
+      {started && gameMessage ? <div className="overlay-top-title">{gameMessage}</div> : null}
       <div className="overlay-top-left">
         {started ? <div className="mode-pill">{name}</div> : null}
         <div className="mode-pill">Wind: {wind.direction} · {wind.speed} km/h</div>
@@ -304,7 +305,8 @@ function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh
         </div>
       ) : null}
       {players.map((p) => (
-        <div key={p.name} className={`player-dot ${p.eliminated ? 'eliminated' : ''}`} style={{ left: `${p.screenX}%`, top: `${p.screenY}%`, background: p.color }} title={p.name}>
+        <div key={p.name} className={`player-dot ${p.eliminated ? 'eliminated' : ''}`} style={{ left: `${p.screenX}%`, top: `${p.screenY}%`, color: p.color }} title={p.name}>
+          <div className="player-dot-icon" dangerouslySetInnerHTML={{ __html: getAvatarSvg(p.avatarId) }} />
           {p.nextTurn === 'left' || p.nextTurn === 'right' ? (
             <div className={`car-marker-signal car-marker-signal-${p.nextTurn}`}>{p.nextTurn === 'left' ? '◀' : '▶'}</div>
           ) : null}
@@ -732,12 +734,16 @@ export default function App({ playerName, renameName, joinRequest }) {
     if (!isSupabaseConfigured) return
     supabase
       .from('online_players')
-      .update({ room_code: joinedRoomCode || null, room_mode: joinedRoomCode ? mode : null })
+      .update({
+        room_code: joinedRoomCode || null,
+        room_mode: joinedRoomCode ? mode : null,
+        room_status: joinedRoomCode ? currentRoom?.status || null : null
+      })
       .eq('name_lower', name.toLowerCase())
       .then(({ error }) => {
         if (error) console.error('Failed to sync room_code:', error.message)
       })
-  }, [joinedRoomCode, mode, name])
+  }, [joinedRoomCode, mode, name, currentRoom?.status])
 
   useEffect(() => {
     const onKey = (e) => {
@@ -1027,7 +1033,14 @@ export default function App({ playerName, renameName, joinRequest }) {
             if (!activeZoomGestureRef.current) map.jumpTo({ center: [posObj.lng, posObj.lat], bearing: 0, pitch })
             carMarkerRef.current?.setRotationAlignment('map')
             carMarkerRef.current?.setRotation(displayedHeading)
+            // The label is a child of the marker, which just rotated by displayedHeading - counter
+            // -rotate it back so the name always reads upright instead of flipping/sliding around
+            // the glyph as the car turns (reported as "the name goes down" when facing south).
+            const labelEl = carMarkerElRef.current?.querySelector('.car-marker-label')
+            if (labelEl) labelEl.style.transform = `translateX(-50%) rotate(${-displayedHeading}deg)`
           } else {
+            const labelElNormal = carMarkerElRef.current?.querySelector('.car-marker-label')
+            if (labelElNormal) labelElNormal.style.transform = 'translateX(-50%)'
             const currentBearing = mapBearingRef.current
             const rawDelta = ((displayedHeading - currentBearing + 540) % 360) - 180
             const maxStep = MAX_BEARING_DEG_PER_SEC * dt
@@ -1471,7 +1484,7 @@ export default function App({ playerName, renameName, joinRequest }) {
       host: sanitizedName,
       status: MODE_CONFIG[mode]?.hostGatedStart ? 'waiting' : 'playing',
       createdAt: Date.now(),
-      players: [{ name: sanitizedName, color: selectedColor, eliminated: false }],
+      players: [{ name: sanitizedName, color: selectedColor, avatarId: selectedAvatarId, eliminated: false }],
       clouds: [],
       items: [],
       itName: null,
@@ -1484,7 +1497,7 @@ export default function App({ playerName, renameName, joinRequest }) {
     setJoinedRoomCode(code)
     setRoomCode(code)
     setStarted(!MODE_CONFIG[mode]?.hostGatedStart)
-  }, [mode, name, roomCode, selectedColor, rooms, setRooms])
+  }, [mode, name, roomCode, selectedColor, selectedAvatarId, rooms, setRooms])
 
   const joinRoom = useCallback(
     (codeToJoin) => {
@@ -1517,6 +1530,7 @@ export default function App({ playerName, renameName, joinRequest }) {
       const newPlayer = {
         name: sanitizedName,
         color: selectedColor,
+        avatarId: selectedAvatarId,
         eliminated: false
       }
 
@@ -1535,7 +1549,7 @@ export default function App({ playerName, renameName, joinRequest }) {
       setMode(room.mode)
       setStarted(nextRoom.status === 'playing')
     },
-    [roomCode, rooms, selectedColor, name, currentPlayer, setRooms]
+    [roomCode, rooms, selectedColor, selectedAvatarId, name, currentPlayer, setRooms]
   )
 
   // "Join" from ChatPanel: App and ChatPanel are sibling components with no shared state, so
@@ -1583,6 +1597,7 @@ export default function App({ playerName, renameName, joinRequest }) {
           return {
             name: p.name,
             color: p.color,
+            avatarId: p.avatarId,
             eliminated: !!p.eliminated,
             nextTurn: live.nextTurn,
             screenX: (point.x / width) * 100,
@@ -1655,24 +1670,22 @@ export default function App({ playerName, renameName, joinRequest }) {
   const roomStatusPanels = currentRoom ? (
     <>
       <div className="room-meta">
-        <div>Room <strong>{currentRoom.code}</strong></div>
-        <div>Status: <strong>{currentRoom.status}</strong></div>
-        <div>Host: <strong>{currentRoom.host || 'Host'}</strong></div>
-        <div>Players: <strong>{currentRoom.players.length}/{currentRoom.maxPlayers}</strong></div>
-        {roundRemainingLabel ? <div>Time left: <strong>{roundRemainingLabel}</strong></div> : null}
-        {isRoomHost ? (
-          <div className="host-controls">
-            {currentRoom.status !== 'playing' ? (
-              <button className="cloud-button" onClick={startRoom} disabled={currentRoom.players.length < roomMinPlayers}>
-                {currentRoom.players.length < roomMinPlayers ? `Start round (need ${roomMinPlayers}+ players)` : 'Start round'}
+        <div className="room-meta-row">
+          <span>Room <strong>{currentRoom.code}</strong> · {currentRoom.status}</span>
+          {isRoomHost ? (
+            currentRoom.status !== 'playing' ? (
+              <button className="room-meta-btn" onClick={startRoom} disabled={currentRoom.players.length < roomMinPlayers} title={currentRoom.players.length < roomMinPlayers ? `Need ${roomMinPlayers}+ players` : 'Start round'}>
+                Start
               </button>
             ) : (
-              <button className="leave-room" onClick={stopRoom}>Stop round</button>
-            )}
-          </div>
-        ) : null}
+              <button className="room-meta-btn room-meta-btn-stop" onClick={stopRoom}>Stop</button>
+            )
+          ) : null}
+        </div>
+        <div className="room-meta-sub">
+          Host {currentRoom.host || 'Host'} · {currentRoom.players.length}/{currentRoom.maxPlayers}{roundRemainingLabel ? ` · ${roundRemainingLabel}` : ''}
+        </div>
       </div>
-      {gameMessage ? <div className="game-message">{gameMessage}</div> : null}
       <div className="room-player-list">
         <div className="room-player-title">Players</div>
         {currentRoom.players.map((player) => {
@@ -1855,13 +1868,15 @@ export default function App({ playerName, renameName, joinRequest }) {
                 </select>
               </label>
             </div>
-            <button className={`cloud-button${turboButtonOn ? ' turbo-toggle-on' : ''}`} onClick={() => setTurboButtonOn((t) => !t)}>
-              {turboButtonOn ? 'Turbo: ON' : 'Turbo'}
-            </button>
-            <button className="cloud-button" onClick={addCloud} disabled={cloudCooldown}>Add cloud</button>
-            {joinedRoomCode ? (
-              <button className="leave-room" onClick={leaveRoom}>Leave room</button>
-            ) : null}
+            <div className="action-button-row">
+              <button className={`cloud-button${turboButtonOn ? ' turbo-toggle-on' : ''}`} onClick={() => setTurboButtonOn((t) => !t)}>
+                {turboButtonOn ? 'Turbo: ON' : 'Turbo'}
+              </button>
+              <button className="cloud-button" onClick={addCloud} disabled={cloudCooldown}>Add cloud</button>
+              {joinedRoomCode ? (
+                <button className="leave-room" onClick={leaveRoom}>Leave room</button>
+              ) : null}
+            </div>
           </div>
         ) : null}
       </div>
@@ -1891,7 +1906,7 @@ export default function App({ playerName, renameName, joinRequest }) {
         {countdown > 0 ? (
           <div className="countdown-overlay">{countdown}</div>
         ) : null}
-        <ScreenOverlay wind={wind} players={screenPlayers} items={screenItems} started={started} name={name} speedKmh={displayedSpeed} turboActive={turboActive} compassRef={compassRef} />
+        <ScreenOverlay wind={wind} players={screenPlayers} items={screenItems} started={started} name={name} speedKmh={displayedSpeed} turboActive={turboActive} compassRef={compassRef} gameMessage={gameMessage} />
       </div>
     </div>
   )

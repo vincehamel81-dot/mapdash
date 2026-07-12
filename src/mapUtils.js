@@ -41,14 +41,33 @@ export function assignSegmentSpeed(segment) {
   return 50
 }
 
+// Some source segments have consecutive duplicate (or near-duplicate) points - confirmed as the
+// actual root cause of a "turns the wrong way no matter what" report at Rue Saint-Antoine/Rue
+// Dalhousie: getLocalHeadingAtDistance computed the local heading from the FIRST two polyline
+// points, and when those two points are identical the direction vector is (0,0), which resolves
+// to a heading of exactly 0deg - a bogus "due north" value that has nothing to do with the
+// street's real direction, silently corrupting chooseNextSegment's angle comparison for that
+// candidate. Deduping here, once, up front, means every downstream consumer (heading calc, length,
+// point-at-distance) just never sees a degenerate zero-length leg.
+function dedupeConsecutivePoints(polyline) {
+  if (!Array.isArray(polyline) || polyline.length < 2) return polyline
+  const deduped = [polyline[0]]
+  for (let i = 1; i < polyline.length; i++) {
+    if (haversine(deduped[deduped.length - 1], polyline[i]) > 0.01) deduped.push(polyline[i])
+  }
+  return deduped.length >= 2 ? deduped : polyline
+}
+
 export function packageSegment(segment) {
-  const lengthMeters = segmentLengthMeters(segment.polyline)
+  const polyline = dedupeConsecutivePoints(segment.polyline)
+  const lengthMeters = segmentLengthMeters(polyline)
   return {
     ...segment,
+    polyline,
     lengthMeters,
     speedKmh: assignSegmentSpeed(segment),
-    startKey: roundCoord(segment.polyline[0]),
-    endKey: roundCoord(segment.polyline[segment.polyline.length - 1])
+    startKey: roundCoord(polyline[0]),
+    endKey: roundCoord(polyline[polyline.length - 1])
   }
 }
 
@@ -547,6 +566,23 @@ export function buildGraph(segments, {
   snapDanglingEndpoints(rawNodes, edges, dangleToleranceMeters)
 
   const nodes = mergeNearbyNodes(rawNodes, toleranceMeters)
+
+  // splitPolylineAtDistances (used by both splitCrossingEdges and snapDanglingEndpoints) can
+  // itself introduce a duplicate leading/trailing point when a cut falls exactly on - or very
+  // near - an existing vertex: the interpolated cut point and that vertex end up (almost)
+  // identical, back to back, in the new piece. Confirmed as the actual root cause of a "turns the
+  // wrong way no matter what" report at Rue Saint-Antoine/Rue Dalhousie - the duplicate point made
+  // getLocalHeadingAtDistance compute a heading from a zero-length first leg (a bogus exact 0deg
+  // "due north"), silently corrupting chooseNextSegment's left/right comparison for that
+  // candidate. packageSegment already dedupes the ORIGINAL polyline up front, but this catches
+  // duplicates introduced by splitting afterward too.
+  for (const edge of edges.values()) {
+    const deduped = dedupeConsecutivePoints(edge.polyline)
+    if (deduped !== edge.polyline) {
+      edge.polyline = deduped
+      edge.lengthMeters = segmentLengthMeters(deduped)
+    }
+  }
 
   // mergeNearbyNodes can produce degenerate zero/near-zero-length edges when both of an edge's
   // endpoints happen to land on the same merged node - confirmed against the real dataset for a
