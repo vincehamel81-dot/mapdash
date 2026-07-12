@@ -743,8 +743,7 @@ export function chooseNextSegment(graph, nodeKey, currentEdge, currentHeadingDeg
     // ramp, a bridge, a highway segment that bends over its length), those two can differ a lot,
     // which is exactly what made the "smallest turn" heuristic below pick a genuinely curving
     // option over a road that actually continues straight, or vice versa.
-    const enteringAtStart = edge.startKey === nodeKey
-    const candidateAngle = getLocalHeadingAtDistance(edge, enteringAtStart ? 0 : edge.lengthMeters, enteringAtStart ? 1 : -1)
+    const candidateAngle = departureHeadingFromNode(edge, nodeKey)
     const angleDelta = signedAngleBetween(referenceHeading, candidateAngle)
     choices.push({ edge, angleDelta, absAngle: Math.abs(angleDelta) })
   }
@@ -794,6 +793,60 @@ export function getLocalHeadingAtDistance(segment, distanceAlong, direction = 1)
     accumulated += segLen
   }
   return getSegmentHeading(segment, direction)
+}
+
+// Heading a car would depart `nodeKey` with if it turned onto `edge` there - the same convention
+// chooseNextSegment uses to score every candidate at an intersection.
+export function departureHeadingFromNode(edge, nodeKey) {
+  const enteringAtStart = edge.startKey === nodeKey
+  return getLocalHeadingAtDistance(edge, enteringAtStart ? 0 : edge.lengthMeters, enteringAtStart ? 1 : -1)
+}
+
+// Heading a car is already traveling with, having just arrived at `nodeKey` via `edge` - the
+// mirror image of departureHeadingFromNode (a car arriving via an edge points the opposite way
+// from a car about to depart back down that same edge).
+function arrivalHeadingAtNode(edge, nodeKey) {
+  const arrivingAtEnd = edge.endKey === nodeKey
+  return getLocalHeadingAtDistance(edge, arrivingAtEnd ? edge.lengthMeters : 0, arrivingAtEnd ? 1 : -1)
+}
+
+// Finds intersections where holding straight ahead would NOT keep the car on the street it's
+// already on, even though that same-named street genuinely continues through the intersection at
+// a plausible "straight ahead" angle - some other, differently-named edge (very often a highway
+// ramp merging in at a shallow angle) has an even smaller angle to the arriving heading, so
+// chooseNextSegment's smallest-angle rule would divert onto it instead. This is the concrete shape
+// of "I pressed W and it turned me onto a ramp/side street anyway" - a wrong default choice at a
+// real, correctly-connected intersection, not a missing connection (see the dead-end/gap checks in
+// scripts/auditGraph.mjs for that separate problem).
+export function findRiskyIntersections(graph, { sameNameMaxAngleDeg = 40 } = {}) {
+  const risky = []
+  for (const node of graph.nodes.values()) {
+    if (node.edges.length < 3) continue
+    for (const enteringEdge of node.edges) {
+      if (!enteringEdge.name) continue
+      const refHeading = arrivalHeadingAtNode(enteringEdge, node.key)
+      const scored = node.edges
+        .filter((edge) => edge.id !== enteringEdge.id)
+        .map((edge) => ({
+          edge,
+          absAngle: Math.abs(signedAngleBetween(refHeading, departureHeadingFromNode(edge, node.key)))
+        }))
+        .sort((a, b) => a.absAngle - b.absAngle)
+
+      const winner = scored[0]
+      const sameName = scored.find((s) => s.edge.name === enteringEdge.name)
+      if (!sameName || sameName.edge.id === winner.edge.id || sameName.absAngle > sameNameMaxAngleDeg) continue
+
+      risky.push({
+        coord: node.coord,
+        streetName: enteringEdge.name,
+        divertsToName: winner.edge.name || '(unnamed street)',
+        straightAngle: Math.round(sameName.absAngle),
+        divertAngle: Math.round(winner.absAngle)
+      })
+    }
+  }
+  return risky
 }
 
 // Resolve where the car ends up on `edge` when entering it at `entryNodeKey` after

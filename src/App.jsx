@@ -20,7 +20,8 @@ import {
   resolveEdgeEntry,
   offsetLatLng,
   haversine,
-  pickRandomStreetPoint
+  pickRandomStreetPoint,
+  findRiskyIntersections
 } from './mapUtils'
 import './App.css'
 
@@ -114,6 +115,33 @@ function polylineToGeoJSON(polyline) {
   return {
     type: 'Feature',
     geometry: { type: 'LineString', coordinates: (polyline || []).map(([lat, lng]) => [lng, lat]) }
+  }
+}
+
+// Debug view: every real drivable edge in the graph, drawn directly over the base map tiles so
+// "this open space looks drivable" vs "this is an actual street the game knows about" stops being
+// a guessing game - see PROJECT_OVERVIEW.md's navigation section for why that ambiguity is
+// suspected to be the biggest root cause of "navigation feels broken" complaints.
+function graphEdgesToGeoJSON(graph) {
+  const edges = graph ? Array.from(graph.edges.values()) : []
+  return {
+    type: 'FeatureCollection',
+    features: edges.map((edge) => ({
+      type: 'Feature',
+      geometry: { type: 'LineString', coordinates: edge.polyline.map(([lat, lng]) => [lng, lat]) },
+      properties: { name: edge.name || '' }
+    }))
+  }
+}
+
+function riskyIntersectionsToGeoJSON(riskyIntersections) {
+  return {
+    type: 'FeatureCollection',
+    features: (riskyIntersections || []).map((r) => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [r.coord[1], r.coord[0]] },
+      properties: { streetName: r.streetName, divertsToName: r.divertsToName }
+    }))
   }
 }
 
@@ -371,6 +399,7 @@ export default function App({ playerName, renameName, joinRequest }) {
   const [mapReady, setMapReady] = useState(false)
   const [showStreetNames, setShowStreetNames] = useState(true)
   const [showRouteLine, setShowRouteLine] = useState(false)
+  const [showDebugGraph, setShowDebugGraph] = useState(false)
   const [northUpMode, setNorthUpMode] = useState(false)
   const [themeId, setThemeId] = useState('voyager')
   const [turboButtonOn, setTurboButtonOn] = useState(false)
@@ -448,6 +477,26 @@ export default function App({ playerName, renameName, joinRequest }) {
       type: 'line',
       source: 'bbox-boundary',
       paint: { 'line-color': '#e53935', 'line-width': 3, 'line-dasharray': [2, 2], 'line-opacity': 0.85 }
+    })
+    // Debug overlay ("Debug: street graph" checkbox) - draws every edge the car can actually
+    // drive on, Pac-Man-maze-wall style, plus red dots at intersections where the game's
+    // straight-ahead default can wrongly divert onto a different street (see
+    // findRiskyIntersections in mapUtils.js). Off by default; hidden until toggled on.
+    map.addSource('debug-graph-edges', { type: 'geojson', data: graphEdgesToGeoJSON(null) })
+    map.addLayer({
+      id: 'debug-graph-edges',
+      type: 'line',
+      source: 'debug-graph-edges',
+      layout: { visibility: 'none' },
+      paint: { 'line-color': '#00e5ff', 'line-width': 4, 'line-opacity': 0.75 }
+    })
+    map.addSource('debug-risky-nodes', { type: 'geojson', data: riskyIntersectionsToGeoJSON([]) })
+    map.addLayer({
+      id: 'debug-risky-nodes',
+      type: 'circle',
+      source: 'debug-risky-nodes',
+      layout: { visibility: 'none' },
+      paint: { 'circle-color': '#ff1744', 'circle-radius': 9, 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2 }
     })
     setMapReady(true)
   }, [])
@@ -664,6 +713,17 @@ export default function App({ playerName, renameName, joinRequest }) {
   const leaveRoomRef = useRef(null)
 
   const currentSegment = useMemo(() => graph?.edges.get(currentEdgeId) || null, [graph, currentEdgeId])
+  const riskyIntersections = useMemo(() => (graph ? findRiskyIntersections(graph) : []), [graph])
+
+  useEffect(() => {
+    if (!mapReady) return
+    const map = mapRef.current
+    if (!map) return
+    map.getSource('debug-graph-edges')?.setData(graphEdgesToGeoJSON(showDebugGraph ? graph : null))
+    map.getSource('debug-risky-nodes')?.setData(riskyIntersectionsToGeoJSON(showDebugGraph ? riskyIntersections : []))
+    map.setLayoutProperty('debug-graph-edges', 'visibility', showDebugGraph ? 'visible' : 'none')
+    map.setLayoutProperty('debug-risky-nodes', 'visibility', showDebugGraph ? 'visible' : 'none')
+  }, [showDebugGraph, graph, riskyIntersections, mapReady])
   // North-up mode: each of W/A/S/D independently causes movement (an absolute compass command),
   // not just W as the accelerator - matches every other mode's "hold W to go" everywhere else.
   const movementKeyHeld = northUpMode ? controls.forward || controls.backward || controls.left || controls.right : controls.forward
@@ -1921,6 +1981,11 @@ export default function App({ playerName, renameName, joinRequest }) {
             <div className="center-toggle">
               <label>
                 <input type="checkbox" checked={northUpMode} onChange={(e) => setNorthUpMode(e.target.checked)} /> North-up fixed map
+              </label>
+            </div>
+            <div className="center-toggle">
+              <label>
+                <input type="checkbox" checked={showDebugGraph} onChange={(e) => setShowDebugGraph(e.target.checked)} /> Debug: street graph
               </label>
             </div>
             <div className="center-toggle">
