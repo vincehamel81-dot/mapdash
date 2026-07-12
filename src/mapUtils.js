@@ -722,10 +722,16 @@ export function signedAngleBetween(a, b) {
   return diff > 180 ? diff - 360 : diff
 }
 
-export function chooseNextSegment(graph, nodeKey, currentEdge, currentHeadingDeg, turnPreference = 'straight') {
+// absoluteTargetDeg (math-angle convention, same as currentHeadingDeg/candidateAngle) is for
+// north-up "Pac-Man style" mode: instead of turning relative to which way the car is currently
+// facing, pick whichever real candidate points closest to a fixed compass direction (whatever W/
+// A/S/D means there) regardless of current heading - by direct request, since the rotating-map
+// mode's "turn relative to facing" model is deliberately NOT what that mode wants.
+export function chooseNextSegment(graph, nodeKey, currentEdge, currentHeadingDeg, turnPreference = 'straight', absoluteTargetDeg = null) {
   const node = graph.nodes.get(nodeKey)
   if (!node) return null
 
+  const referenceHeading = absoluteTargetDeg !== null ? absoluteTargetDeg : currentHeadingDeg
   const choices = []
   for (const edge of node.edges) {
     if (edge.id === currentEdge.id) continue
@@ -739,20 +745,24 @@ export function chooseNextSegment(graph, nodeKey, currentEdge, currentHeadingDeg
     // option over a road that actually continues straight, or vice versa.
     const enteringAtStart = edge.startKey === nodeKey
     const candidateAngle = getLocalHeadingAtDistance(edge, enteringAtStart ? 0 : edge.lengthMeters, enteringAtStart ? 1 : -1)
-    const angleDelta = signedAngleBetween(currentHeadingDeg, candidateAngle)
+    const angleDelta = signedAngleBetween(referenceHeading, candidateAngle)
     choices.push({ edge, angleDelta, absAngle: Math.abs(angleDelta) })
   }
 
   if (!choices.length) return null
 
   let filtered = choices
-  if (turnPreference === 'left') {
-    const left = choices.filter((choice) => choice.angleDelta > 10)
-    filtered = left.length ? left : choices
-  } else if (turnPreference === 'right') {
-    const right = choices.filter((choice) => choice.angleDelta < -10)
-    filtered = right.length ? right : choices
+  if (absoluteTargetDeg === null) {
+    if (turnPreference === 'left') {
+      const left = choices.filter((choice) => choice.angleDelta > 10)
+      filtered = left.length ? left : choices
+    } else if (turnPreference === 'right') {
+      const right = choices.filter((choice) => choice.angleDelta < -10)
+      filtered = right.length ? right : choices
+    }
   }
+  // In absolute mode, angleDelta is already measured against the fixed compass target, so sorting
+  // by absAngle alone picks whichever real street points closest to it - no left/right filtering.
 
   filtered.sort((a, b) => a.absAngle - b.absAngle)
   return filtered[0]?.edge || choices[0]?.edge || null

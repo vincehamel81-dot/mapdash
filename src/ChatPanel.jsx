@@ -9,15 +9,17 @@ const MESSAGE_PAGE_SIZE = 100
 // forever. Generous 4.5x margin over the heartbeat interval to tolerate normal network hiccups.
 const ONLINE_STALE_MS = 90000
 
-// Each person has one message "wall" they post to; adding someone as a friend (a one-directional
-// follow) lets you read their wall. There's no per-pair DM thread - selecting yourself shows your
-// own wall (read+write), selecting a friend shows theirs (read-only), matching the "one feed per
-// person, readable by their friends" model.
+// One merged chat feed instead of separate per-person "walls": friendship is now a request/accept
+// flow (not an auto-follow), and once mutual, both people's messages fold into the same single
+// timeline - you never "select" a person to view, you just see everything from yourself + anyone
+// you're mutually connected to, chronologically. A friend of a friend you're not yourself mutually
+// connected to is invisible to you, even inside a message thread they're part of - visibility is
+// purely "am I mutually accepted with the sender", nothing more.
 export default function ChatPanel({ myName, onRequestJoin }) {
   const [open, setOpen] = useState(false)
   const [onlinePlayers, setOnlinePlayers] = useState([])
-  const [friends, setFriends] = useState([])
-  const [selected, setSelected] = useState('me')
+  const [friendRows, setFriendRows] = useState([]) // every row where I'm the follower, any status
+  const [incomingRequests, setIncomingRequests] = useState([]) // rows where I'm followed, status='pending'
   const [messages, setMessages] = useState([])
   const [draft, setDraft] = useState('')
 
@@ -57,60 +59,95 @@ export default function ChatPanel({ myName, onRequestJoin }) {
     if (!isSupabaseConfigured) return
     supabase
       .from('friends')
-      .select('followed_name_lower, followed_display_name')
+      .select('followed_name_lower, followed_display_name, status')
       .eq('follower_name_lower', myNameLower)
-      .then(({ data }) => { if (data) setFriends(data) })
+      .then(({ data }) => { if (data) setFriendRows(data) })
+    supabase
+      .from('friends')
+      .select('follower_name_lower, status')
+      .eq('followed_name_lower', myNameLower)
+      .eq('status', 'pending')
+      .then(({ data }) => { if (data) setIncomingRequests(data) })
   }, [myNameLower])
 
   useEffect(() => {
     refreshFriends()
   }, [refreshFriends])
 
-  // The friends table had no realtime subscription at all - refreshFriends only ever ran once on
-  // mount plus after this client's own add/remove calls, so anything that changed it from
-  // elsewhere (another tab, a future feature) would silently never show up without a page reload.
+  // Both directions matter now (a request I sent, and a request sent to me), so this subscription
+  // watches the whole table rather than filtering by follower_name_lower - there's no single
+  // column filter that covers "either side of a row involving me".
   useEffect(() => {
     if (!isSupabaseConfigured) return
     const channel = supabase
       .channel(`friends-${myNameLower}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'friends', filter: `follower_name_lower=eq.${myNameLower}` }, refreshFriends)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'friends' }, refreshFriends)
       .subscribe()
     return () => supabase.removeChannel(channel)
   }, [myNameLower, refreshFriends])
 
-  const addFriend = useCallback((nameLower, displayName) => {
+  const requestFriend = useCallback((nameLower, displayName) => {
     if (!isSupabaseConfigured) return
     supabase
       .from('friends')
-      .upsert({ follower_name_lower: myNameLower, followed_name_lower: nameLower, followed_display_name: displayName })
+      .upsert({ follower_name_lower: myNameLower, followed_name_lower: nameLower, followed_display_name: displayName, status: 'pending' })
+      .then(() => refreshFriends())
+  }, [myNameLower, refreshFriends])
+
+  const acceptRequest = useCallback((requesterNameLower, requesterDisplayName) => {
+    if (!isSupabaseConfigured) return
+    // Confirm the incoming row, and mirror one back the other way so a simple
+    // "follower_name_lower = me" query (used everywhere else) finds this friendship too - mutual
+    // friendship is represented as both directions existing with status='accepted'.
+    supabase
+      .from('friends')
+      .update({ status: 'accepted' })
+      .eq('follower_name_lower', requesterNameLower)
+      .eq('followed_name_lower', myNameLower)
+      .then(() => {
+        supabase
+          .from('friends')
+          .upsert({ follower_name_lower: myNameLower, followed_name_lower: requesterNameLower, followed_display_name: requesterDisplayName, status: 'accepted' })
+          .then(() => refreshFriends())
+      })
+  }, [myNameLower, refreshFriends])
+
+  const declineRequest = useCallback((requesterNameLower) => {
+    if (!isSupabaseConfigured) return
+    supabase
+      .from('friends')
+      .delete()
+      .eq('follower_name_lower', requesterNameLower)
+      .eq('followed_name_lower', myNameLower)
       .then(() => refreshFriends())
   }, [myNameLower, refreshFriends])
 
   const removeFriend = useCallback((nameLower) => {
     if (!isSupabaseConfigured) return
-    supabase
-      .from('friends')
-      .delete()
-      .eq('follower_name_lower', myNameLower)
-      .eq('followed_name_lower', nameLower)
-      .then(() => {
-        refreshFriends()
-        setSelected((current) => (current === nameLower ? 'me' : current))
-      })
+    // Removes both directions of an accepted friendship (or a pending request either way).
+    Promise.all([
+      supabase.from('friends').delete().eq('follower_name_lower', myNameLower).eq('followed_name_lower', nameLower),
+      supabase.from('friends').delete().eq('follower_name_lower', nameLower).eq('followed_name_lower', myNameLower)
+    ]).then(() => refreshFriends())
   }, [myNameLower, refreshFriends])
 
-  const canViewSelected = selected === 'me' || friends.some((f) => f.followed_name_lower === selected)
+  const acceptedFriends = useMemo(() => friendRows.filter((f) => f.status === 'accepted'), [friendRows])
+  const pendingSentSet = useMemo(() => new Set(friendRows.filter((f) => f.status === 'pending').map((f) => f.followed_name_lower)), [friendRows])
+  const acceptedLowerSet = useMemo(() => new Set(acceptedFriends.map((f) => f.followed_name_lower)), [acceptedFriends])
 
+  // The merged feed: everyone I'm mutually accepted with, plus myself. Re-fetched on any message
+  // insert anywhere (no per-sender filter possible for an "IN (...)" style list via postgres_changes)
+  // rather than trying to filter server-side - message volume here is low enough that this is fine.
   useEffect(() => {
-    if (!isSupabaseConfigured || !open || !canViewSelected) return
-    const wallOwner = selected === 'me' ? myNameLower : selected
+    if (!isSupabaseConfigured || !open) return
     let cancelled = false
+    const senders = [myNameLower, ...acceptedLowerSet]
 
     const load = () => {
       supabase
         .from('messages')
-        .select('id, sender_display_name, body, created_at')
-        .eq('sender_name_lower', wallOwner)
+        .select('id, sender_name_lower, sender_display_name, body, created_at')
+        .in('sender_name_lower', senders)
         .order('created_at', { ascending: false })
         .limit(MESSAGE_PAGE_SIZE)
         .then(({ data }) => {
@@ -120,15 +157,16 @@ export default function ChatPanel({ myName, onRequestJoin }) {
     load()
 
     const channel = supabase
-      .channel(`messages-${wallOwner}`)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `sender_name_lower=eq.${wallOwner}` }, load)
+      .channel(`messages-${myNameLower}`)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, load)
       .subscribe()
 
     return () => {
       cancelled = true
       supabase.removeChannel(channel)
     }
-  }, [selected, canViewSelected, open, myNameLower])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, myNameLower, acceptedFriends.length])
 
   const sendMessage = useCallback((e) => {
     e.preventDefault()
@@ -145,7 +183,6 @@ export default function ChatPanel({ myName, onRequestJoin }) {
     setDraft('')
   }, [draft, myNameLower, myName])
 
-  const friendLowerSet = useMemo(() => new Set(friends.map((f) => f.followed_name_lower)), [friends])
   const onlineByName = useMemo(() => new Map(onlinePlayers.map((p) => [p.name_lower, p])), [onlinePlayers])
 
   // green = actively playing a round, yellow = online (in a room's lobby or just browsing), red =
@@ -168,16 +205,29 @@ export default function ChatPanel({ myName, onRequestJoin }) {
         ) : (
           <div className="chat-body">
             <div className="chat-contacts">
-              <button className={selected === 'me' ? 'selected' : ''} onClick={() => setSelected('me')}>Me</button>
+              {incomingRequests.length ? (
+                <>
+                  <div className="chat-section-title">Requests</div>
+                  {incomingRequests.map((r) => {
+                    const requesterOnline = onlineByName.get(r.follower_name_lower)
+                    const displayName = requesterOnline?.display_name || r.follower_name_lower
+                    return (
+                      <div key={r.follower_name_lower} className="chat-contact-row">
+                        <span>{displayName}</span>
+                        <button className="chat-join" onClick={() => acceptRequest(r.follower_name_lower, displayName)}>Accept</button>
+                        <button className="chat-remove" onClick={() => declineRequest(r.follower_name_lower)} title="Decline">x</button>
+                      </div>
+                    )
+                  })}
+                </>
+              ) : null}
               <div className="chat-section-title">Friends</div>
-              {friends.map((f) => {
+              {acceptedFriends.map((f) => {
                 const online = onlineByName.get(f.followed_name_lower)
                 return (
                   <div key={f.followed_name_lower} className="chat-contact-row">
                     <span className={`chat-status-dot chat-status-${statusColor(online)}`} title={statusColor(online)} />
-                    <button className={selected === f.followed_name_lower ? 'selected' : ''} onClick={() => setSelected(f.followed_name_lower)}>
-                      {f.followed_display_name}
-                    </button>
+                    <span>{f.followed_display_name}</span>
                     {online?.room_code ? (
                       <>
                         {MODE_CONFIG[online.room_mode] ? <span className="chat-ingame-label">{MODE_CONFIG[online.room_mode].label}</span> : null}
@@ -199,10 +249,12 @@ export default function ChatPanel({ myName, onRequestJoin }) {
                       <button className="chat-join" onClick={() => onRequestJoin?.(p.room_code)} title="Join their room">Join</button>
                     </>
                   ) : null}
-                  {friendLowerSet.has(p.name_lower) ? (
-                    <span className="chat-following">following</span>
+                  {acceptedLowerSet.has(p.name_lower) ? (
+                    <span className="chat-following">friends</span>
+                  ) : pendingSentSet.has(p.name_lower) ? (
+                    <span className="chat-following">requested</span>
                   ) : (
-                    <button onClick={() => addFriend(p.name_lower, p.display_name)}>+ add</button>
+                    <button onClick={() => requestFriend(p.name_lower, p.display_name)}>+ add</button>
                   )}
                 </div>
               ))}
@@ -216,12 +268,10 @@ export default function ChatPanel({ myName, onRequestJoin }) {
                   </div>
                 ))}
               </div>
-              {selected === 'me' ? (
-                <form className="chat-compose" onSubmit={sendMessage}>
-                  <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Say something..." maxLength={500} />
-                  <button type="submit">Send</button>
-                </form>
-              ) : null}
+              <form className="chat-compose" onSubmit={sendMessage}>
+                <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Say something..." maxLength={500} />
+                <button type="submit">Send</button>
+              </form>
             </div>
           </div>
         )

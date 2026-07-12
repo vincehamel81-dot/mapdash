@@ -15,6 +15,7 @@ import {
   getLocalHeadingAtDistance,
   getSegmentPosition,
   normalizeAngle,
+  signedAngleBetween,
   toCompassBearing,
   resolveEdgeEntry,
   offsetLatLng,
@@ -200,15 +201,18 @@ const defaultPosition = {
   speed: 0
 }
 
-function useDrivingControls(started, onControlsChange, onZoomChange, onReverseTap) {
+function useDrivingControls(started, onControlsChange, onZoomChange, onReverseTap, northUpMode) {
   useEffect(() => {
     if (!started) return
 
     // reverseKeyDown is purely internal edge-detection (so holding S doesn't repeat-fire the
     // flip on the browser's keydown auto-repeat) - it's never exposed via onControlsChange, since
-    // S/ArrowDown is a one-shot action now, not a held control.
-    const pressed = { forward: false, left: false, right: false, turbo: false, reverseKeyDown: false }
-    const update = () => onControlsChange({ forward: pressed.forward, left: pressed.left, right: pressed.right, turbo: pressed.turbo })
+    // S/ArrowDown is a one-shot action in the normal (rotating-map) mode, not a held control. In
+    // north-up "Pac-Man style" mode (by direct request - a deliberately different mechanism from
+    // the rotating map, where S is a held absolute-south command, not a facing flip), S/ArrowDown
+    // behaves like forward/left/right instead: held = go, released = stop.
+    const pressed = { forward: false, left: false, right: false, turbo: false, backward: false, reverseKeyDown: false }
+    const update = () => onControlsChange({ forward: pressed.forward, left: pressed.left, right: pressed.right, turbo: pressed.turbo, backward: pressed.backward })
 
     const down = (e) => {
       const key = e.key
@@ -222,7 +226,12 @@ function useDrivingControls(started, onControlsChange, onZoomChange, onReverseTa
         }
       }
       if (key === 'ArrowDown' || key === 's' || key === 'S') {
-        if (!pressed.reverseKeyDown) {
+        if (northUpMode) {
+          if (!pressed.backward) {
+            pressed.backward = true
+            update()
+          }
+        } else if (!pressed.reverseKeyDown) {
           pressed.reverseKeyDown = true
           onReverseTap()
         }
@@ -257,6 +266,10 @@ function useDrivingControls(started, onControlsChange, onZoomChange, onReverseTa
       }
       if (key === 'ArrowDown' || key === 's' || key === 'S') {
         pressed.reverseKeyDown = false
+        if (pressed.backward) {
+          pressed.backward = false
+          update()
+        }
       }
       if (key === 'ArrowLeft' || key === 'a' || key === 'A') {
         pressed.left = false
@@ -278,7 +291,7 @@ function useDrivingControls(started, onControlsChange, onZoomChange, onReverseTa
       window.removeEventListener('keydown', down)
       window.removeEventListener('keyup', up)
     }
-  }, [started, onControlsChange, onZoomChange, onReverseTap])
+  }, [started, onControlsChange, onZoomChange, onReverseTap, northUpMode])
 }
 
 function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh, turboActive, compassRef, gameMessage }) {
@@ -335,7 +348,7 @@ export default function App({ playerName, renameName, joinRequest }) {
   const [activeStreet, setActiveStreet] = useState('Rue inconnue')
   const [activeArrondissement, setActiveArrondissement] = useState('')
   const [activeQuartier, setActiveQuartier] = useState('')
-  const [controls, setControls] = useState({ forward: false, left: false, right: false, turbo: false })
+  const [controls, setControls] = useState({ forward: false, left: false, right: false, turbo: false, backward: false })
   const [turnPreference, setTurnPreference] = useState('straight')
   const [nextTurnSignal, setNextTurnSignal] = useState('straight')
   const turnPreferenceRef = useRef('straight')
@@ -651,11 +664,14 @@ export default function App({ playerName, renameName, joinRequest }) {
   const leaveRoomRef = useRef(null)
 
   const currentSegment = useMemo(() => graph?.edges.get(currentEdgeId) || null, [graph, currentEdgeId])
+  // North-up mode: each of W/A/S/D independently causes movement (an absolute compass command),
+  // not just W as the accelerator - matches every other mode's "hold W to go" everywhere else.
+  const movementKeyHeld = northUpMode ? controls.forward || controls.backward || controls.left || controls.right : controls.forward
   const displayedSpeed = useMemo(() => {
     // Doubled from the street's raw value across the board - a 50 km/h street plays at 100
     // normal, 200 under Turbo. S/ArrowDown is an instant facing-flip now (see the tick loop),
     // not a held reverse gear, so there's no separate reverse speed tier anymore.
-    const base = (controls.forward ? currentSegment?.speedKmh ?? 50 : 0) * 2
+    const base = (movementKeyHeld ? currentSegment?.speedKmh ?? 50 : 0) * 2
     // Tag's "It" drives 1.5x everyone else's speed.
     const isIt = currentRoom?.mode === 'tag' && currentRoom.itName === name
     if (isIt) return base * 1.5
@@ -663,9 +679,9 @@ export default function App({ playerName, renameName, joinRequest }) {
     // except Tag - It's 1.5x above is the only speed buff Tag allows.
     const turboActive = (controls.turbo || turboButtonOn) && currentRoom?.mode !== 'tag'
     return turboActive ? base * 2 : base
-  }, [controls, currentSegment, currentRoom, name, turboButtonOn])
+  }, [controls, movementKeyHeld, currentSegment, currentRoom, name, turboButtonOn])
 
-  const turboActive = (controls.turbo || turboButtonOn) && controls.forward && currentRoom?.mode !== 'tag'
+  const turboActive = (controls.turbo || turboButtonOn) && movementKeyHeld && currentRoom?.mode !== 'tag'
 
   // Throttled to ~8Hz so cross-device position sync stays well within the realtime message
   // budget - this never touches Supabase's database, only the ephemeral broadcast channel.
@@ -825,7 +841,7 @@ export default function App({ playerName, renameName, joinRequest }) {
     movementRef.current.direction *= -1
   }, [])
 
-  useDrivingControls(started, handleControlsChange, handleZoomChange, flipDirection)
+  useDrivingControls(started, handleControlsChange, handleZoomChange, flipDirection, northUpMode)
 
   useEffect(() => {
     fetch('/data/QBC/segments.json')
@@ -900,10 +916,36 @@ export default function App({ playerName, renameName, joinRequest }) {
 
       const speedKmh = displayedSpeed
       const metersPerSecond = speedKmh / 3.6
+
+      // North-up "Pac-Man style" mode (by direct request): W/A/S/D each mean a fixed absolute
+      // compass direction, decoupled entirely from the rotating-map mode's "turn relative to
+      // current facing" model - hold one to translate that way along whatever real street allows
+      // it. Figure out the target compass direction from held keys, then (a) flip which way along
+      // the CURRENT segment counts as "forward" if the other end now matches better, and (b) feed
+      // it into chooseNextSegment as an absolute target at the next intersection, instead of the
+      // rotating mode's relative turnPreference.
+      let absoluteTargetMathDeg = null
+      if (northUpModeRef.current) {
+        const compassTarget = controls.backward ? 180
+          : controls.forward ? 0
+          : controls.left ? 270
+          : controls.right ? 90
+          : null
+        if (compassTarget !== null) absoluteTargetMathDeg = normalizeAngle(90 - compassTarget)
+      }
+
       // `direction` is which way travel moves distanceAlong along the stored polyline (±1).
       // S/ArrowDown flips it instantly (see the keydown handler near pendingTurnRef) instead of
       // reverse being a held gear - so unlike the old model, this is always the car's true
-      // current travel direction, nothing else combines with it per-frame.
+      // current travel direction, nothing else combines with it per-frame. In north-up mode,
+      // instead it's picked fresh every frame to match whichever way better serves the held key.
+      if (absoluteTargetMathDeg !== null) {
+        const forwardHeading = normalizeAngle(getLocalHeadingAtDistance(currentSegment, movementRef.current.distanceAlong, 1))
+        const backwardHeading = normalizeAngle(getLocalHeadingAtDistance(currentSegment, movementRef.current.distanceAlong, -1))
+        const forwardDelta = Math.abs(signedAngleBetween(absoluteTargetMathDeg, forwardHeading))
+        const backwardDelta = Math.abs(signedAngleBetween(absoluteTargetMathDeg, backwardHeading))
+        movementRef.current.direction = forwardDelta <= backwardDelta ? 1 : -1
+      }
       const direction = movementRef.current.direction
       const travelDelta = metersPerSecond * dt * direction
       let nextDistanceAlong = movementRef.current.distanceAlong + travelDelta
@@ -925,7 +967,8 @@ export default function App({ playerName, renameName, joinRequest }) {
           exitNodeKey,
           currentSegment,
           currentHeading,
-          turnChoice
+          turnChoice,
+          absoluteTargetMathDeg
         )
         if (nextEdge) {
           nextEdgeId = nextEdge.id
@@ -1025,22 +1068,17 @@ export default function App({ playerName, renameName, joinRequest }) {
           // rather than looking straight down at it, per direct feedback.
           const pitch = themeIdRef.current === 'satellite' ? 60 : 0
           if (northUpModeRef.current) {
-            // Map stays pinned north-up; the car marker itself rotates to show real heading
-            // instead (rotationAlignment: 'map'), so the turn-signal arrows - positioned via
-            // plain child-relative CSS - rotate along with it and stay on the car's actual
-            // left/right, same as a real turn signal.
+            // "Pac-Man style" by direct request: map stays pinned north-up AND the car sprite
+            // always points up too, completely decoupled from its real travel heading (which
+            // still drives the underlying street-graph movement/absoluteTargetMathDeg above,
+            // just never shown visually) - deliberately different from the rotating-map mode,
+            // where the marker rotates to show real facing. No label counter-rotation needed
+            // since the marker itself never rotates here.
             mapBearingRef.current = 0
             if (!activeZoomGestureRef.current) map.jumpTo({ center: [posObj.lng, posObj.lat], bearing: 0, pitch })
-            carMarkerRef.current?.setRotationAlignment('map')
-            carMarkerRef.current?.setRotation(displayedHeading)
-            // The label is a child of the marker, which just rotated by displayedHeading - counter
-            // -rotate it back so the name always reads upright instead of flipping/sliding around
-            // the glyph as the car turns (reported as "the name goes down" when facing south).
-            const labelEl = carMarkerElRef.current?.querySelector('.car-marker-label')
-            if (labelEl) labelEl.style.transform = `translateX(-50%) rotate(${-displayedHeading}deg)`
+            carMarkerRef.current?.setRotationAlignment('viewport')
+            carMarkerRef.current?.setRotation(0)
           } else {
-            const labelElNormal = carMarkerElRef.current?.querySelector('.car-marker-label')
-            if (labelElNormal) labelElNormal.style.transform = 'translateX(-50%)'
             const currentBearing = mapBearingRef.current
             const rawDelta = ((displayedHeading - currentBearing + 540) % 360) - 180
             const maxStep = MAX_BEARING_DEG_PER_SEC * dt
