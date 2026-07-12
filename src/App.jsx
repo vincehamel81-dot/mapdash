@@ -357,7 +357,8 @@ function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh
         </div>
       ) : null}
       {players.map((p) => (
-        <div key={p.name} className={`player-dot ${p.eliminated ? 'eliminated' : ''}`} style={{ left: `${p.screenX}%`, top: `${p.screenY}%`, color: p.color }} title={p.name}>
+        <div key={p.name} className="player-dot" style={{ left: `${p.screenX}%`, top: `${p.screenY}%`, color: p.color }}>
+          <div className="car-marker-label">{p.name}</div>
           <div className="player-dot-icon" dangerouslySetInnerHTML={{ __html: getAvatarSvg(p.avatarId) }} />
           {p.nextTurn === 'left' || p.nextTurn === 'right' ? (
             <div className={`car-marker-signal car-marker-signal-${p.nextTurn}`}>{p.nextTurn === 'left' ? '◀' : '▶'}</div>
@@ -591,7 +592,12 @@ export default function App({ playerName, renameName, joinRequest }) {
   // whole time they're in it, not just the initial join.
   useEffect(() => {
     if (!currentRoom) return
-    const shouldBeStarted = currentRoom.status === 'playing' && !currentRoom.players.find((p) => p.name === name)?.eliminated
+    // Staying "started" through 'finished' (not just 'playing') keeps the map/HUD visible with a
+    // results panel on top when a round ends, instead of yanking everyone straight back to the
+    // full create/join lobby screen the instant the timer hits zero - there's no rush, the room
+    // stays open until whoever's still in it chooses to leave or the host restarts.
+    const shouldBeStarted = (currentRoom.status === 'playing' || currentRoom.status === 'finished') &&
+      !currentRoom.players.find((p) => p.name === name)?.eliminated
     setStarted((prev) => (prev === shouldBeStarted ? prev : shouldBeStarted))
   }, [currentRoom, name])
 
@@ -1550,13 +1556,6 @@ export default function App({ playerName, renameName, joinRequest }) {
     }
   }, [currentRoom, isRoomHost, startCountdown, restartImmediate])
 
-  const closeRoom = useCallback(() => {
-    if (!currentRoom) return
-    deleteRoom(currentRoom.code)
-    setJoinedRoomCode(null)
-    setStarted(false)
-  }, [currentRoom, deleteRoom])
-
   const startRoom = useCallback(() => {
     if (!currentRoom || !isRoomHost) return
     const cfg = MODE_CONFIG[currentRoom.mode]
@@ -1688,11 +1687,15 @@ export default function App({ playerName, renameName, joinRequest }) {
       if (room.players.some((player) => player.name === sanitizedName)) {
         setJoinedRoomCode(code)
         setMode(room.mode)
-        setStarted(room.status === 'playing' && !currentPlayer?.eliminated)
+        setStarted((room.status === 'playing' || room.status === 'finished') && !currentPlayer?.eliminated)
         return
       }
       if (MODE_CONFIG[room.mode]?.hostGatedStart && room.status === 'playing') {
         alert('This round has already started.')
+        return
+      }
+      if (MODE_CONFIG[room.mode]?.hostGatedStart && room.status === 'finished') {
+        alert('This round has already finished.')
         return
       }
       if (room.players.length >= room.maxPlayers) {
@@ -1867,8 +1870,11 @@ export default function App({ playerName, renameName, joinRequest }) {
       const container = map.getContainer()
       const width = container.clientWidth
       const height = container.clientHeight
+      // Eliminated players (caught in Tag) are removed from the map entirely, not just dimmed -
+      // once you're out, you're out, same as how a Tag round already treats you (see
+      // "Tagged! Watch for the next round.").
       return currentRoom.players
-        .filter((p) => p.name !== name && livePositions[p.name])
+        .filter((p) => p.name !== name && !p.eliminated && livePositions[p.name])
         .map((p) => {
           const live = livePositions[p.name]
           const point = map.project([live.lng, live.lat])
@@ -1876,7 +1882,6 @@ export default function App({ playerName, renameName, joinRequest }) {
             name: p.name,
             color: p.color,
             avatarId: p.avatarId,
-            eliminated: !!p.eliminated,
             nextTurn: live.nextTurn,
             screenX: (point.x / width) * 100,
             screenY: (point.y / height) * 100
@@ -1983,7 +1988,8 @@ export default function App({ playerName, renameName, joinRequest }) {
           const live = livePositions[player.name]
           return (
             <div key={player.name} className="room-player-item">
-              <span style={{ color: player.color }}>
+              <span className="room-player-identity" style={{ color: player.color }}>
+                <span className="room-player-avatar" dangerouslySetInnerHTML={{ __html: getAvatarSvg(player.avatarId) }} />
                 {player.name}
                 {player.isNpc ? ' (Bot)' : ''}
                 {currentRoom.itName === player.name ? ' (It)' : ''}
@@ -1995,7 +2001,7 @@ export default function App({ playerName, renameName, joinRequest }) {
               ) : currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard' ? (
                 <span className="player-status active">{isSelf ? (player.foundItems || []).length : live?.foundCount ?? 0}/{FINDER_ITEMS.length}</span>
               ) : player.eliminated ? (
-                <span className="player-status">Eliminated</span>
+                <span className="player-status">{currentRoom.mode === 'tag' ? 'Caught' : 'Eliminated'}</span>
               ) : (
                 <span className="player-status active">Alive</span>
               )}
@@ -2106,7 +2112,7 @@ export default function App({ playerName, renameName, joinRequest }) {
                     {isRoomHost ? (
                       <button className="cloud-button" onClick={restartRoom}>Restart round</button>
                     ) : null}
-                    <button className="leave-room" onClick={closeRoom}>Leave room</button>
+                    <button className="leave-room" onClick={leaveRoom}>Leave room</button>
                   </div>
                 ) : null}
                 {MODE_CONFIG[mode]?.roomBased && !joinedRoomCode ? (
@@ -2117,8 +2123,9 @@ export default function App({ playerName, renameName, joinRequest }) {
                         .filter((room) => room.mode === mode && room.status !== 'closed' && !isRoomStale(room))
                         .map((room) => {
                           const inProgress = MODE_CONFIG[room.mode]?.hostGatedStart && room.status === 'playing'
+                          const finished = room.status === 'finished'
                           const full = room.players.length >= room.maxPlayers
-                          const unjoinable = inProgress || full
+                          const unjoinable = inProgress || finished || full
                           return (
                             <div key={room.code} className="room-item">
                               <div>
@@ -2128,7 +2135,7 @@ export default function App({ playerName, renameName, joinRequest }) {
                                 disabled={unjoinable}
                                 onClick={() => { setRoomCode(room.code); joinRoom(room.code) }}
                               >
-                                {inProgress ? 'In-game' : full ? 'Full' : 'Join'}
+                                {inProgress ? 'In-game' : finished ? 'Finished' : full ? 'Full' : 'Join'}
                               </button>
                             </div>
                           )
@@ -2144,6 +2151,15 @@ export default function App({ playerName, renameName, joinRequest }) {
           </div>
         ) : null}
         {started ? roomStatusPanels : null}
+        {started && currentRoom?.status === 'finished' ? (
+          <div className="room-finished">
+            <div>{currentRoom.winners?.length ? `${currentRoom.winners.join(' & ')} won` : 'Round finished'}</div>
+            {isRoomHost ? (
+              <button className="cloud-button" onClick={restartRoom}>Restart round</button>
+            ) : null}
+            <button className="leave-room" onClick={leaveRoom}>Leave room</button>
+          </div>
+        ) : null}
         {started ? (
           <div className="status-panel">
             <div className="center-toggle">

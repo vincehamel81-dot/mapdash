@@ -252,6 +252,23 @@
   border-radius: 12px;
 }
 
+.room-player-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.room-player-avatar {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.room-player-avatar svg {
+  width: 100%;
+  height: 100%;
+}
+
 .player-status {
   font-size: 0.82rem;
   padding: 4px 8px;
@@ -578,11 +595,6 @@
 .player-dot-icon svg {
   width: 100%;
   height: 100%;
-}
-
-.player-dot.eliminated {
-  opacity: 0.35;
-  filter: grayscale(80%);
 }
 
 .item-marker {
