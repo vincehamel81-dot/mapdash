@@ -90,6 +90,7 @@ export function useRoomSync() {
           console.error('Failed to load rooms:', error.message)
           return
         }
+        console.warn('[roomSync] initial load:', (data || []).map((r) => r.code))
         setRoomsState((data || []).map(rowToRoom))
       })
 
@@ -97,6 +98,7 @@ export function useRoomSync() {
       .channel('rooms-changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms' }, (payload) => {
         if (cancelled) return
+        console.warn('[roomSync] realtime event:', payload.eventType, 'code:', payload.new?.code || payload.old?.code, 'status:', payload.new?.status)
         setRoomsState((prev) => {
           if (payload.eventType === 'DELETE') {
             const deletedCode = payload.old?.code
@@ -113,7 +115,7 @@ export function useRoomSync() {
           return copy
         })
       })
-      .subscribe()
+      .subscribe((status) => console.warn('[roomSync] channel subscribe status:', status))
 
     return () => {
       cancelled = true
@@ -131,6 +133,11 @@ export function useRoomSync() {
   // actually intends to remove - never inferred from what's absent in a possibly-incomplete list.
   const updateRooms = useCallback((nextRooms) => {
     const prevByCode = new Map(roomsRef.current.map((r) => [r.code, r]))
+    const prevCodes = roomsRef.current.map((r) => r.code)
+    const nextCodes = nextRooms.map((r) => r.code)
+    if (prevCodes.length !== nextCodes.length || prevCodes.some((c, i) => c !== nextCodes[i])) {
+      console.warn('[roomSync] updateRooms changing room list:', prevCodes, '->', nextCodes)
+    }
 
     if (isSupabaseConfigured) {
       for (const room of nextRooms) {
@@ -157,6 +164,11 @@ export function useRoomSync() {
   }, [])
 
   const deleteRoom = useCallback((code) => {
+    // TODO(debug): a live report of a room disappearing ~3s after creation, with zero errors and
+    // zero of the other roomSync logs firing, hasn't been explained yet - console.trace here shows
+    // exactly which caller (leaveRoom? closeRoom? something else?) is invoking this unexpectedly.
+    console.warn('[roomSync] deleteRoom called for', code)
+    console.trace('[roomSync] deleteRoom call stack')
     if (isSupabaseConfigured) {
       supabase
         .from('rooms')
