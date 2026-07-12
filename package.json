@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "audit:graph": "node scripts/auditGraph.mjs",
-    "sync:street-data": "node scripts/syncStreetData.mjs"
+    "sync:street-data": "node scripts/syncStreetData.mjs",
+    "assign:neighborhoods": "node scripts/assignNeighborhoods.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.2",

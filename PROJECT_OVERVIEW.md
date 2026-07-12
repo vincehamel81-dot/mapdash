@@ -153,11 +153,15 @@ to physically-driveable categories only — excludes bike paths, sidewalks, park
 Replaced an older, much smaller multi-municipality extract after live testing repeatedly found real
 streets (a roundabout, several grid-street gaps) visible on the base map tiles with no graph edge
 at all — confirmed as a genuine data-completeness gap, not a graph-algorithm bug, by cross-
-referencing against this dataset directly. Known trade-off: this source has no
-arrondissement/quartier fields, so the in-game "active street" banner's admin-area line no longer
-renders (handled gracefully, not a crash — just a lost cosmetic detail); restoring it would need a
-second Données Québec dataset (administrative boundary polygons) joined by point-in-polygon, not
-yet done.
+referencing against this dataset directly.
+
+`npm run assign:neighborhoods` (`scripts/assignNeighborhoods.mjs`) restores arrondissement/quartier
+afterward via point-in-polygon (own small ray-casting + WKT parser, no new dependencies) against
+`data-sources/district_delimiters.json` (the 6 Québec arrondissements, clean GeoJSON) and
+`data-sources/quartiers-vdq.csv` (the 35 official Québec quartiers, WKT) — both reused as-is from a
+sibling project (`C:\sites\gumballquiz\tools\fetchSegments.js`) that had already solved this exact
+join against the same official sources. ~99.8% of segments matched on first run. Run this right
+after `sync:street-data` any time the street data is refreshed.
 
 At every intersection, `chooseNextSegment()` scores every real candidate edge by how close its
 local departure heading is to either (a) your current heading, filtered by left/right preference
