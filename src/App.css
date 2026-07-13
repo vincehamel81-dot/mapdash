@@ -666,6 +666,70 @@
   margin-top: 4px;
 }
 
+.radar-indicator {
+  position: absolute;
+  width: 34px;
+  height: 34px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 640;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.radar-arrow {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+}
+
+.radar-arrow::after {
+  content: '';
+  position: absolute;
+  top: -7px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-left: 7px solid transparent;
+  border-right: 7px solid transparent;
+  border-bottom: 9px solid currentColor;
+}
+
+.radar-item .radar-arrow {
+  color: #ffb400;
+}
+
+.radar-it .radar-arrow {
+  color: #e53935;
+}
+
+.radar-prey .radar-arrow {
+  color: currentColor;
+}
+
+.radar-icon {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  z-index: 1;
+}
+
+.radar-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.radar-icon-it {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #e53935;
+  font-weight: 800;
+  font-size: 1rem;
+}
+
 body, html, #root {
   margin: 0;
   padding: 0;

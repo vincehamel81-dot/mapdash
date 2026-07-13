@@ -129,6 +129,35 @@ function carMarkerMarkup(avatarId, color, label, turnSignal) {
   return `${safeLabel ? `<div class="car-marker-label">${safeLabel}</div>` : ''}<div class="car-marker-glyph" style="color:${color}">${getAvatarSvg(avatarId)}</div>${signalHtml}`
 }
 
+// "Radar" off-screen indicator: given a target's screen PIXEL position (which may be negative or
+// exceed the container, i.e. off-screen) and the container's size, returns null if it's already
+// on-screen (its own marker is visible, no indicator needed), or a clamped point on an inset
+// rectangle around the screen center plus the angle to rotate an arrow glyph to point at it -
+// classic "edge radar" technique from other games (Fortnite's compass, Katamari Damacy's cousin
+// arrows, etc).
+function computeEdgeIndicator(px, py, width, height, margin) {
+  const onScreen = px >= 0 && px <= width && py >= 0 && py <= height
+  if (onScreen) return null
+  const cx = width / 2
+  const cy = height / 2
+  const dx = px - cx
+  const dy = py - cy
+  const angleRad = Math.atan2(dy, dx)
+  const halfW = Math.max(1, width / 2 - margin)
+  const halfH = Math.max(1, height / 2 - margin)
+  const cosA = Math.cos(angleRad)
+  const sinA = Math.sin(angleRad)
+  const scaleX = Math.abs(cosA) > 1e-6 ? halfW / Math.abs(cosA) : Infinity
+  const scaleY = Math.abs(sinA) > 1e-6 ? halfH / Math.abs(sinA) : Infinity
+  const scale = Math.min(scaleX, scaleY)
+  return {
+    x: cx + cosA * scale,
+    y: cy + sinA * scale,
+    // +90 because the arrow glyph points "up" (north) at rotate(0) - atan2's 0deg is due east.
+    angleDeg: (angleRad * 180) / Math.PI + 90
+  }
+}
+
 function polylineToGeoJSON(polyline) {
   return {
     type: 'Feature',
@@ -340,7 +369,7 @@ function useDrivingControls(started, onControlsChange, onZoomChange, onReverseTa
   }, [started, onControlsChange, onZoomChange, onReverseTap, northUpMode])
 }
 
-function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh, turboActive, compassRef, gameMessage }) {
+function ScreenOverlay({ wind, players = [], items = [], radarTargets = [], started, name, speedKmh, turboActive, compassRef, gameMessage }) {
   return (
     <div className="screen-overlay">
       {started && gameMessage ? <div className="overlay-top-title">{gameMessage}</div> : null}
@@ -378,6 +407,20 @@ function ScreenOverlay({ wind, players = [], items = [], started, name, speedKmh
             <div className={`item-marker-label${item.screenY < 12 ? ' item-marker-label-below' : ''}`}>{item.label}</div>
           ) : null}
           <div className="item-marker-icon" dangerouslySetInnerHTML={{ __html: getFinderItemSvg(item.iconId) }} />
+        </div>
+      ))}
+      {radarTargets.map((t) => (
+        <div
+          key={t.key}
+          className={`radar-indicator radar-${t.kind}`}
+          style={{ left: `${t.screenX}%`, top: `${t.screenY}%`, ...(t.color ? { color: t.color } : {}) }}
+        >
+          <div className="radar-arrow" style={{ transform: `rotate(${t.angleDeg}deg)` }} />
+          {t.kind === 'item' ? (
+            <div className="radar-icon" dangerouslySetInnerHTML={{ __html: getFinderItemSvg(t.iconId) }} />
+          ) : t.kind === 'it' ? (
+            <div className="radar-icon radar-icon-it">!</div>
+          ) : null}
         </div>
       ))}
     </div>
@@ -1881,6 +1924,85 @@ export default function App({ playerName, renameName, joinRequest }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentRoom, currentPlayer, mapViewTick])
 
+  // Off-screen "radar" indicators - Finder (Easy) items not currently on-screen, and in Tag
+  // whichever direction actually matters for the player driving right now: It sees every other
+  // real (non-eliminated, non-NPC) player as prey, everyone else sees only It as the threat to
+  // avoid. Reuses the same map.project() pixel projection screenItems/screenPlayers already do.
+  const radarTargets = useMemo(() => {
+    if (!currentRoom || !mapRef.current) return []
+    const isFinderEasy = currentRoom.mode === 'finder-easy'
+    const isTag = currentRoom.mode === 'tag'
+    if (!isFinderEasy && !isTag) return []
+    try {
+      const map = mapRef.current
+      const container = map.getContainer()
+      const width = container.clientWidth
+      const height = container.clientHeight
+      const margin = 44
+      const targets = []
+
+      if (isFinderEasy) {
+        const foundIds = currentPlayer?.foundItems || []
+        for (const item of currentRoom.items || []) {
+          if (foundIds.includes(item.id)) continue
+          const point = map.project([item.lng, item.lat])
+          const edge = computeEdgeIndicator(point.x, point.y, width, height, margin)
+          if (!edge) continue
+          targets.push({
+            key: `item-${item.id}`,
+            kind: 'item',
+            iconId: item.iconId,
+            screenX: (edge.x / width) * 100,
+            screenY: (edge.y / height) * 100,
+            angleDeg: edge.angleDeg
+          })
+        }
+      }
+
+      if (isTag) {
+        const amIt = currentRoom.itName === name
+        if (amIt) {
+          for (const p of currentRoom.players) {
+            if (p.name === name || p.isNpc || p.eliminated) continue
+            const pos = livePositions[p.name]
+            if (!pos) continue
+            const point = map.project([pos.lng, pos.lat])
+            const edge = computeEdgeIndicator(point.x, point.y, width, height, margin)
+            if (!edge) continue
+            targets.push({
+              key: `prey-${p.name}`,
+              kind: 'prey',
+              color: p.color,
+              screenX: (edge.x / width) * 100,
+              screenY: (edge.y / height) * 100,
+              angleDeg: edge.angleDeg
+            })
+          }
+        } else if (!eliminated) {
+          const itPos = livePositions[currentRoom.itName]
+          if (itPos) {
+            const point = map.project([itPos.lng, itPos.lat])
+            const edge = computeEdgeIndicator(point.x, point.y, width, height, margin)
+            if (edge) {
+              targets.push({
+                key: 'it',
+                kind: 'it',
+                screenX: (edge.x / width) * 100,
+                screenY: (edge.y / height) * 100,
+                angleDeg: edge.angleDeg
+              })
+            }
+          }
+        }
+      }
+
+      return targets
+    } catch {
+      return []
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentRoom, currentPlayer, name, eliminated, livePositions, mapViewTick])
+
   const itemDistances = useMemo(() => {
     if (!currentRoom || !(currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard')) return []
     const foundIds = currentPlayer?.foundItems || []
@@ -2201,7 +2323,7 @@ export default function App({ playerName, renameName, joinRequest }) {
           <button className="cloud-button" onClick={zoomOut}>−</button>
           <button className="leave-room" onClick={quitGame}>Quit</button>
         </div>
-        <ScreenOverlay wind={wind} players={screenPlayers} items={screenItems} started={started} name={name} speedKmh={displayedSpeed} turboActive={turboActive} compassRef={compassRef} gameMessage={gameMessage} />
+        <ScreenOverlay wind={wind} players={screenPlayers} items={screenItems} radarTargets={radarTargets} started={started} name={name} speedKmh={displayedSpeed} turboActive={turboActive} compassRef={compassRef} gameMessage={gameMessage} />
       </div>
     </div>
   )
