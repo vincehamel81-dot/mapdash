@@ -47,6 +47,14 @@ const CARDINAL_ANGLES = {
 // (Android Auto style) instead of snapping instantly to the new segment's direction.
 const MAX_BEARING_DEG_PER_SEC = 220
 const CLOUD_MOVE_INTERVAL_MS = 7000
+// Raised from the original 5/8 floor/ceiling - clouds now spread across the whole bbox instead of
+// clustering near one player, so a higher count is needed to keep the field feeling populated.
+const CLOUD_MIN_COUNT = 10
+const CLOUD_MAX_COUNT = 20
+// Degrees of slack applied to CONFIG.bbox when deciding a drifting cloud has left the playable
+// area (~3km) - generous enough that wind drift only prunes clouds that have genuinely blown well
+// clear of the map, not ones still hovering near its edge.
+const CLOUD_BBOX_MARGIN_DEG = 0.03
 
 // Read once at module load - a `?debugRoundMs=` query param overrides Survival/Tag's round
 // duration so verification doesn't require waiting out a real 5-10 minute round. Inert in normal
@@ -58,9 +66,13 @@ const DEBUG_ROUND_MS = (() => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null
 })()
 
+// wideBbox: true opts a mode into CONFIG.bboxWide (the full synced street network, ~3x/~2x the
+// tight bbox's lat/lng span) instead of CONFIG.bbox - Single/Team have no items or clouds to worry
+// about spawning sensibly across a bigger area, so they get the whole city; modes with spawning
+// logic (Survival's clouds, Finder's items) stay on the curated tight box for now.
 export const MODE_CONFIG = {
-  single: { label: 'Single', roomBased: false, hostGatedStart: false, minPlayers: 1, maxPlayers: 1, roundDurationMs: null },
-  team: { label: 'Team', roomBased: true, hostGatedStart: false, minPlayers: 2, maxPlayers: 10, roundDurationMs: null },
+  single: { label: 'Single', roomBased: false, hostGatedStart: false, minPlayers: 1, maxPlayers: 1, roundDurationMs: null, wideBbox: true },
+  team: { label: 'Team', roomBased: true, hostGatedStart: false, minPlayers: 2, maxPlayers: 10, roundDurationMs: null, wideBbox: true },
   survival: { label: 'Survival', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: DEBUG_ROUND_MS ?? 10 * 60 * 1000 },
   'finder-easy': { label: 'Finder (Easy)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: null },
   'finder-roaming': { label: 'Finder (Roaming)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: null },
@@ -338,6 +350,14 @@ function cloudsToGeoJSON(clouds) {
   }
 }
 
+function bboxOutlineGeoJSON(box) {
+  const { south, west, north, east } = box
+  return {
+    type: 'Feature',
+    geometry: { type: 'LineString', coordinates: [[west, south], [east, south], [east, north], [west, north], [west, south]] }
+  }
+}
+
 // Most clouds are modest, but occasionally (~15%) spawn a genuinely huge one spanning several
 // street blocks, per the "clouds should feel epic sometimes, not uniformly small" request. The
 // big-cloud ceiling is doubled (220-1000m instead of 220-500m) per direct feedback that even the
@@ -346,6 +366,31 @@ function cloudsToGeoJSON(clouds) {
 function randomCloudRadius(sizeMultiplier = 1) {
   const base = Math.random() < 0.15 ? 220 + Math.random() * 780 : 20 + Math.random() * 70
   return base * sizeMultiplier
+}
+
+// Clouds should persist for most of a round rather than being pruned after drifting a fixed
+// distance - 7-15 minutes per direct feedback (Survival rounds run 10 minutes total).
+function randomCloudLifetimeMs() {
+  return 7 * 60000 + Math.random() * 8 * 60000
+}
+
+// Spawns are spread uniformly across the whole playable bbox, not anchored to any one player's
+// position - a room has multiple players scattered across the map, so anchoring to whichever
+// client happened to run the spawn tick (the host) clustered every cloud around just them.
+function randomPointInBbox() {
+  return {
+    lat: CONFIG.bbox.south + Math.random() * (CONFIG.bbox.north - CONFIG.bbox.south),
+    lng: CONFIG.bbox.west + Math.random() * (CONFIG.bbox.east - CONFIG.bbox.west)
+  }
+}
+
+function isWithinPaddedBbox(lat, lng) {
+  return (
+    lat >= CONFIG.bbox.south - CLOUD_BBOX_MARGIN_DEG &&
+    lat <= CONFIG.bbox.north + CLOUD_BBOX_MARGIN_DEG &&
+    lng >= CONFIG.bbox.west - CLOUD_BBOX_MARGIN_DEG &&
+    lng <= CONFIG.bbox.east + CLOUD_BBOX_MARGIN_DEG
+  )
 }
 
 const defaultPosition = {
@@ -510,8 +555,10 @@ export default function App({ playerName, renameName, joinRequest }) {
   const [started, setStarted] = useState(false)
   const [zoom, setZoom] = useState(CONFIG.defaultZoom)
   const [position, setPosition] = useState(defaultPosition)
+  const [rawSegments, setRawSegments] = useState(null)
   const [segments, setSegments] = useState([])
   const [graph, setGraph] = useState(null)
+  const graphCacheRef = useRef({})
   const [currentEdgeId, setCurrentEdgeId] = useState(null)
   const [activeStreet, setActiveStreet] = useState('Rue inconnue')
   const [activeArrondissement, setActiveArrondissement] = useState('')
@@ -556,7 +603,6 @@ export default function App({ playerName, renameName, joinRequest }) {
   const compassRef = useRef(null)
   const northUpModeRef = useRef(false)
   const activeZoomGestureRef = useRef(false)
-  const themeIdRef = useRef('voyager')
   const showDebugGraphRef = useRef(false)
 
   useEffect(() => {
@@ -566,10 +612,6 @@ export default function App({ playerName, renameName, joinRequest }) {
   useEffect(() => {
     showDebugGraphRef.current = showDebugGraph
   }, [showDebugGraph])
-
-  useEffect(() => {
-    themeIdRef.current = themeId
-  }, [themeId])
 
   const handleMapReady = useCallback((map) => {
     mapRef.current = map
@@ -604,16 +646,13 @@ export default function App({ playerName, renameName, joinRequest }) {
         'fill-outline-color': 'rgba(90,110,135,0.55)'
       }
     })
-    // A static outline of the playable area (CONFIG.bbox, which street data is filtered to) - the
-    // boundary itself isn't driveable-past-blocked, but it's now genuinely the edge of the street
-    // network, so seeing it coming is the whole point.
-    const { south, west, north, east } = CONFIG.bbox
+    // An outline of the playable area - the boundary itself isn't driveable-past-blocked, but
+    // it's now genuinely the edge of the street network, so seeing it coming is the whole point.
+    // Kept in sync with the active mode's bbox (tight vs wide) by the effect further below;
+    // initialized with the tight box here as a placeholder, overwritten immediately once mapReady.
     map.addSource('bbox-boundary', {
       type: 'geojson',
-      data: {
-        type: 'Feature',
-        geometry: { type: 'LineString', coordinates: [[west, south], [east, south], [east, north], [west, north], [west, south]] }
-      }
+      data: bboxOutlineGeoJSON(CONFIG.bbox)
     })
     map.addLayer({
       id: 'bbox-boundary',
@@ -1066,27 +1105,38 @@ export default function App({ playerName, renameName, joinRequest }) {
   useEffect(() => {
     fetch('/data/QBC/segments.json')
       .then((res) => res.json())
-      .then((data) => {
-        // The raw file covers a much wider region (Lévis across the river, plus ~50 smaller
-        // outlying municipalities that geographically interleave with Quebec City's own bounds -
-        // a plain bbox-containment filter alone still let ~1800 Lévis segments through) than the
-        // playable area, so first restrict to the source data's own `city` field (precise
-        // regardless of geographic overlap), then further restrict to CONFIG.bbox (now
-        // deliberately smaller than all of Quebec City proper, per feedback that even that felt
-        // too big) so what's actually loaded exactly matches the visible boundary on the map.
-        const { south, west, north, east } = CONFIG.bbox
-        const withinBbox = (poly) => poly.every(([lat, lng]) => lat >= south && lat <= north && lng >= west && lng <= east)
-        setSegments(data.filter((s) => s.city === 'Québec' && withinBbox(s.polyline)))
-      })
+      .then(setRawSegments)
       .catch(() => {
         console.error('Unable to load street data')
       })
   }, [])
 
+  const wideBboxMode = Boolean(MODE_CONFIG[mode]?.wideBbox)
+
   useEffect(() => {
-    if (!segments.length) return
-    setGraph(buildGraph(segments))
-  }, [segments])
+    if (!rawSegments) return
+    // Two bbox variants share one raw fetch: the tight curated box (most modes) and the wide
+    // full-city box (Single/Team, see MODE_CONFIG). Each is filtered+built once and cached here -
+    // switching modes back and forth in the setup screen shouldn't rebuild a 20k+ segment graph
+    // every time.
+    const cacheKey = wideBboxMode ? 'wide' : 'tight'
+    const cached = graphCacheRef.current[cacheKey]
+    if (cached) {
+      setSegments(cached.segments)
+      setGraph(cached.graph)
+      return
+    }
+    const box = wideBboxMode ? CONFIG.bboxWide : CONFIG.bbox
+    const withinBbox = (poly) => poly.every(([lat, lng]) => lat >= box.south && lat <= box.north && lng >= box.west && lng <= box.east)
+    // The raw file covers a much wider region (Lévis across the river, plus ~50 smaller outlying
+    // municipalities) than any playable area - restrict to the source data's own `city` field
+    // (precise regardless of geographic overlap) before applying either bbox.
+    const filtered = rawSegments.filter((s) => s.city === 'Québec' && withinBbox(s.polyline))
+    const builtGraph = buildGraph(filtered)
+    graphCacheRef.current[cacheKey] = { segments: filtered, graph: builtGraph }
+    setSegments(filtered)
+    setGraph(builtGraph)
+  }, [rawSegments, wideBboxMode])
 
   useEffect(() => {
     if (!graph) return
@@ -1320,11 +1370,6 @@ export default function App({ playerName, renameName, joinRequest }) {
         // without the camera snapping back to the default spawn on every animation frame.
         const map = mapRef.current
         if (map && startedRef.current) {
-          // Satellite is aerial photography, not a data-driven 3D scene (no building-height data
-          // exists to extrude), so there's no true first-person view available - tilting the
-          // camera over the flat photo is the closest approximation to "driving through the city"
-          // rather than looking straight down at it, per direct feedback.
-          const pitch = themeIdRef.current === 'satellite' ? 60 : 0
           if (northUpModeRef.current) {
             // "Pac-Man style" by direct request: map stays pinned north-up AND the car sprite
             // always points up too, completely decoupled from its real travel heading (which
@@ -1333,7 +1378,7 @@ export default function App({ playerName, renameName, joinRequest }) {
             // where the marker rotates to show real facing. No label counter-rotation needed
             // since the marker itself never rotates here.
             mapBearingRef.current = 0
-            if (!activeZoomGestureRef.current) map.jumpTo({ center: [posObj.lng, posObj.lat], bearing: 0, pitch })
+            if (!activeZoomGestureRef.current) map.jumpTo({ center: [posObj.lng, posObj.lat], bearing: 0, pitch: 0 })
             carMarkerRef.current?.setRotationAlignment('viewport')
             carMarkerRef.current?.setRotation(0)
           } else {
@@ -1346,7 +1391,7 @@ export default function App({ playerName, renameName, joinRequest }) {
             // while a scroll-wheel zoom gesture is in progress (see the zoomstart/zoomend
             // listeners in handleMapReady) so it doesn't cancel MapLibre's own zoom easing.
             if (!activeZoomGestureRef.current) {
-              map.jumpTo({ center: [posObj.lng, posObj.lat], bearing: mapBearingRef.current, pitch })
+              map.jumpTo({ center: [posObj.lng, posObj.lat], bearing: mapBearingRef.current, pitch: 0 })
             }
             carMarkerRef.current?.setRotationAlignment('viewport')
             carMarkerRef.current?.setRotation(0)
@@ -1390,6 +1435,13 @@ export default function App({ playerName, renameName, joinRequest }) {
     const source = map.getSource('clouds')
     if (source) source.setData(cloudsToGeoJSON(clouds))
   }, [clouds, mapReady])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !mapReady) return
+    const source = map.getSource('bbox-boundary')
+    if (source) source.setData(bboxOutlineGeoJSON(wideBboxMode ? CONFIG.bboxWide : CONFIG.bbox))
+  }, [wideBboxMode, mapReady])
 
   useEffect(() => {
     const map = mapRef.current
@@ -1456,7 +1508,9 @@ export default function App({ playerName, renameName, joinRequest }) {
     const updateWind = () => {
       const directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
       const direction = directions[Math.floor(Math.random() * directions.length)]
-      const speed = Math.floor(20 + Math.random() * 60)
+      // Bumped up from 20-80 - faster-moving clouds per direct feedback ("make sure to... make
+      // players move").
+      const speed = Math.floor(40 + Math.random() * 100)
       setWind({ direction, speed, angle: CARDINAL_ANGLES[direction] })
     }
 
@@ -1477,67 +1531,74 @@ export default function App({ playerName, renameName, joinRequest }) {
       return Object.values(live.livePositions || {}).some((p) => haversine([lat, lng], [p.lat, p.lng]) < threshold)
     }
 
-    const spawnCloudNear = (anchor) => {
+    const spawnCloud = () => {
       const isSurvival = liveRef.current.currentRoom?.mode === 'survival'
-      const radiusMeters = randomCloudRadius(isSurvival ? 2 : 1)
-      let lat, lng
-      // Retry a few times to avoid spawning right on top of a player - in every mode now, not
-      // just survival (cosmetic clouds spawning on top of you were still an immersion-breaking
-      // annoyance even without damage); accept the last candidate even if still close rather than
-      // spawning nothing.
+      // "Almost twice as big, not twice as big" - 1.75x rather than 2x for Survival.
+      const radiusMeters = randomCloudRadius(isSurvival ? 1.75 : 1)
+      // Retry a few times to avoid spawning right on top of a player; unlike before, give up on
+      // this spawn entirely if every attempt is still too close, rather than forcing a bad spawn -
+      // a cloud landing directly on a player instantly stripped their health with no way to react.
       for (let attempt = 0; attempt < 10; attempt++) {
-        const bearing = Math.random() * 360
-        const distance = 250 + Math.random() * 650
-        ;[lat, lng] = offsetLatLng([anchor.lat, anchor.lng], bearing, distance)
-        if (!isTooCloseToAnyPlayer(lat, lng, radiusMeters)) break
+        const { lat, lng } = randomPointInBbox()
+        if (!isTooCloseToAnyPlayer(lat, lng, radiusMeters)) {
+          return {
+            id: crypto.randomUUID(),
+            lat,
+            lng,
+            radiusMeters,
+            // Every mode's clouds get a visual tier now, not just Survival's - it only *drives
+            // damage* in Survival (gated separately, in the tick loop), elsewhere purely cosmetic.
+            tier: randomCloudTier(),
+            createdAt: Date.now(),
+            lifetimeMs: randomCloudLifetimeMs()
+          }
+        }
       }
-      return {
-        id: crypto.randomUUID(),
-        lat,
-        lng,
-        radiusMeters,
-        // Every mode's clouds get a visual tier now, not just Survival's - it only *drives damage*
-        // in Survival (gated separately, in the tick loop), everywhere else it's purely cosmetic.
-        tier: randomCloudTier()
-      }
+      return null
     }
 
-    const driftAndPrune = (list, anchor) => {
+    const driftAndPrune = (list) => {
       const distanceMeters = (wind.speed / 3.6) * (CLOUD_MOVE_INTERVAL_MS / 1000)
       const driftBearing = wind.angle ?? 0
+      const now = Date.now()
       return list
         .map((cloud) => {
           const [lat, lng] = offsetLatLng([cloud.lat, cloud.lng], driftBearing, distanceMeters)
           return { ...cloud, lat, lng }
         })
-        .filter((cloud) => haversine([cloud.lat, cloud.lng], [anchor.lat, anchor.lng]) <= 1800)
+        .filter(
+          (cloud) =>
+            isWithinPaddedBbox(cloud.lat, cloud.lng) &&
+            now - (cloud.createdAt ?? 0) < (cloud.lifetimeMs ?? randomCloudLifetimeMs())
+        )
     }
 
     const moveClouds = () => {
-      const anchor = positionRef.current || CONFIG.startPosition
       // Host computes authoritative cloud state and writes it to the room
       if (isRoomHost && currentRoom) {
         const base = Array.isArray(currentRoom.clouds) && currentRoom.clouds.length ? currentRoom.clouds : clouds
-        const next = driftAndPrune(base, anchor)
+        const next = driftAndPrune(base)
 
-        if (next.length < 5 || Math.random() < 0.4) {
-          next.push(spawnCloudNear(anchor))
+        if (next.length < CLOUD_MIN_COUNT || Math.random() < 0.4) {
+          const spawned = spawnCloud()
+          if (spawned) next.push(spawned)
         }
 
-        if (next.length > 8) next.splice(0, next.length - 8)
+        if (next.length > CLOUD_MAX_COUNT) next.splice(0, next.length - CLOUD_MAX_COUNT)
         updateRoom(currentRoom.code, (room) => ({ ...room, clouds: next }))
         setClouds(next)
       } else {
         // Non-host clients will receive cloud updates from the room; fallback to local behavior if none exists
         if (!currentRoom?.clouds || !currentRoom.clouds.length) {
           setClouds((prev) => {
-            const next = driftAndPrune(prev, anchor)
+            const next = driftAndPrune(prev)
 
-            if (next.length < 5 || Math.random() < 0.4) {
-              next.push(spawnCloudNear(anchor))
+            if (next.length < CLOUD_MIN_COUNT || Math.random() < 0.4) {
+              const spawned = spawnCloud()
+              if (spawned) next.push(spawned)
             }
 
-            if (next.length > 8) next.splice(0, next.length - 8)
+            if (next.length > CLOUD_MAX_COUNT) next.splice(0, next.length - CLOUD_MAX_COUNT)
             return next
           })
         }
@@ -1553,7 +1614,15 @@ export default function App({ playerName, renameName, joinRequest }) {
     const anchor = pickedSpawn || CONFIG.startPosition
     const spawn = (bearing, distance) => {
       const [lat, lng] = offsetLatLng([anchor.lat, anchor.lng], bearing, distance)
-      return { id: crypto.randomUUID(), lat, lng, radiusMeters: randomCloudRadius(), tier: randomCloudTier() }
+      return {
+        id: crypto.randomUUID(),
+        lat,
+        lng,
+        radiusMeters: randomCloudRadius(),
+        tier: randomCloudTier(),
+        createdAt: Date.now(),
+        lifetimeMs: randomCloudLifetimeMs()
+      }
     }
     setClouds([spawn(40, 350), spawn(200, 500)])
   }, [])
@@ -1618,7 +1687,25 @@ export default function App({ playerName, renameName, joinRequest }) {
             return { id: `item-${i}-${crypto.randomUUID()}`, iconId: def.id, label: def.label, lat: pt.lat, lng: pt.lng, foundBy: null }
           })
         : []
-      return { players: nextPlayers, itName, items, roundStartedAt: Date.now() }
+      // Survival starts with a dense swarm of small clouds scattered across the bbox instead of
+      // waiting for the ambient spawner to slowly build up from empty, per direct feedback that
+      // the opening moments felt too sparse.
+      const clouds =
+        roomMode === 'survival'
+          ? Array.from({ length: 12 }, () => {
+              const { lat, lng } = randomPointInBbox()
+              return {
+                id: crypto.randomUUID(),
+                lat,
+                lng,
+                radiusMeters: (20 + Math.random() * 70) * 1.75,
+                tier: randomCloudTier(),
+                createdAt: Date.now(),
+                lifetimeMs: randomCloudLifetimeMs()
+              }
+            })
+          : []
+      return { players: nextPlayers, itName, items, roundStartedAt: Date.now(), clouds }
     },
     [graph]
   )
@@ -1683,6 +1770,7 @@ export default function App({ playerName, renameName, joinRequest }) {
       players: roundExtras ? roundExtras.players : currentRoom.players,
       itName: roundExtras ? roundExtras.itName : null,
       items: roundExtras ? roundExtras.items : [],
+      clouds: roundExtras ? roundExtras.clouds : currentRoom.clouds,
       roundStartedAt: roundExtras ? roundExtras.roundStartedAt : null,
       winners: []
     }
@@ -1708,6 +1796,7 @@ export default function App({ playerName, renameName, joinRequest }) {
     if (!room) {
       setJoinedRoomCode(null)
       setStarted(false)
+      setRoomCode('')
       return
     }
     const remainingPlayers = room.players.filter((player) => player.name !== name)
@@ -2079,11 +2168,22 @@ export default function App({ playerName, renameName, joinRequest }) {
     const bearing = Math.random() * 360
     const distance = 150 + Math.random() * 500
     const [lat, lng] = offsetLatLng([anchor.lat, anchor.lng], bearing, distance)
-    const newCloud = { id: crypto.randomUUID(), lat, lng, radiusMeters: randomCloudRadius(), tier: randomCloudTier() }
-    if (currentRoom && isRoomHost) {
-      updateRoom(currentRoom.code, (room) => ({ ...room, clouds: [...(room.clouds || []), newCloud].slice(-8) }))
+    const newCloud = {
+      id: crypto.randomUUID(),
+      lat,
+      lng,
+      radiusMeters: randomCloudRadius(),
+      tier: randomCloudTier(),
+      createdAt: Date.now(),
+      lifetimeMs: randomCloudLifetimeMs()
+    }
+    // Any room member can add one - not just the host. Non-host clients used to only update their
+    // own local `clouds` state, which the very next room sync (mirroring the host's authoritative
+    // list) silently overwrote, making the button appear to do nothing.
+    if (currentRoom) {
+      updateRoom(currentRoom.code, (room) => ({ ...room, clouds: [...(room.clouds || []), newCloud].slice(-CLOUD_MAX_COUNT) }))
     } else {
-      setClouds((prev) => [...prev, newCloud].slice(-8))
+      setClouds((prev) => [...prev, newCloud].slice(-CLOUD_MAX_COUNT))
     }
     setCloudCooldown(true)
     window.setTimeout(() => setCloudCooldown(false), 10000)

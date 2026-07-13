@@ -1,7 +1,6 @@
 import { useEffect, useRef } from 'react'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
-import { CONFIG } from './config'
 
 // Thin imperative wrapper around a maplibre-gl Map. Unlike react-leaflet, this deliberately
 // does not try to model map state declaratively - the game's rAF-driven movement loop needs to
@@ -27,14 +26,11 @@ export default function MapView({ tileUrls, attribution, center, zoom, onReady, 
       },
       center: [center.lng, center.lat],
       zoom,
-      // CONFIG.bbox only ever filtered which STREET DATA loads - it never actually stopped the
-      // camera itself from panning/zooming out far enough to reveal real neighbouring cities
-      // (Lévis, Île d'Orléans) on the base map tiles, which is what repeated bbox-shrinking never
-      // actually fixed. maxBounds constrains the camera itself, not just the data.
-      maxBounds: [
-        [CONFIG.bbox.west, CONFIG.bbox.south],
-        [CONFIG.bbox.east, CONFIG.bbox.north]
-      ],
+      // maxBounds was removed: it hard-clamps the rendered viewport itself, so following the
+      // player near a bbox edge fought the clamp and glitched instead of just showing what's
+      // beyond it. Per direct feedback, players should be able to SEE outside the playable area
+      // (Lévis, the river, etc.) - they just can't drive there, which the street graph already
+      // guarantees on its own (there's no road data to move along past the bbox).
       dragRotate: false,
       touchZoomRotate: false,
       pitchWithRotate: false,

@@ -12,6 +12,17 @@ export const CONFIG = {
     north: 46.87402689541307,
     east: -71.19891865935556
   },
+  // The full extent of the synced street network (every segment already tagged city==='Québec',
+  // no additional trimming) - roughly 3x the tight bbox's latitude span and 2x its longitude span,
+  // reaching all the way to Cap-Rouge. Used by modes that want a much bigger playable area (see
+  // MODE_CONFIG's wideBbox flag in App.jsx) without needing a separate data sync - this data was
+  // always there, just filtered out at runtime for the tighter modes.
+  bboxWide: {
+    south: 46.7351463596,
+    west: -71.5370310453,
+    north: 46.9717669608,
+    east: -71.1426341151
+  },
   defaultZoom: 15,
   minZoom: 12,
   maxZoom: 20,
@@ -35,13 +46,5 @@ export const THEMES = {
     baseNoLabels: cartoTiles('light_nolabels'),
     baseWithLabels: cartoTiles('light_all'),
     attribution: '&copy; OpenStreetMap contributors'
-  },
-  // Esri's free World Imagery service - aerial/satellite photography, no separate "no labels"
-  // variant exists for it so both fields point at the same tile set.
-  satellite: {
-    name: 'Satellite',
-    baseNoLabels: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
-    baseWithLabels: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
-    attribution: 'Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics'
   }
 }
