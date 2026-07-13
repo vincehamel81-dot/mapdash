@@ -1128,9 +1128,16 @@ export default function App({ playerName, renameName, joinRequest }) {
   useDrivingControls(started, handleControlsChange, handleZoomChange, flipDirection, northUpMode)
 
   useEffect(() => {
-    fetch('/data/QBC/segments.json')
-      .then((res) => res.json())
-      .then(setRawSegments)
+    // Two files: Québec's own synced data (city==='Québec' throughout - Ville de Québec's
+    // open-data portal never covered Lévis), and Lévis's separately imported from the gumballquiz
+    // sibling project (see scripts/importLevisData.mjs) in the exact same schema. Only the wide
+    // bbox (Single/Team) ever needs Lévis - merged here regardless since it's cheap to carry the
+    // extra ~3800 rows and filter them out for the tight-bbox modes below.
+    Promise.all([
+      fetch('/data/QBC/segments.json').then((res) => res.json()),
+      fetch('/data/QBC/segments-levis.json').then((res) => res.json())
+    ])
+      .then(([quebec, levis]) => setRawSegments([...quebec, ...levis]))
       .catch(() => {
         console.error('Unable to load street data')
       })
@@ -1140,10 +1147,10 @@ export default function App({ playerName, renameName, joinRequest }) {
 
   useEffect(() => {
     if (!rawSegments) return
-    // Two bbox variants share one raw fetch: the tight curated box (most modes) and the wide
-    // full-city box (Single/Team, see MODE_CONFIG). Each is filtered+built once and cached here -
-    // switching modes back and forth in the setup screen shouldn't rebuild a 20k+ segment graph
-    // every time.
+    // Two bbox variants share one raw fetch: the tight curated box (most modes, Québec only) and
+    // the wide full-region box (Single/Team, see MODE_CONFIG - Québec + Lévis). Each is
+    // filtered+built once and cached here - switching modes back and forth in the setup screen
+    // shouldn't rebuild a 20k+ segment graph every time.
     const cacheKey = wideBboxMode ? 'wide' : 'tight'
     const cached = graphCacheRef.current[cacheKey]
     if (cached) {
@@ -1153,10 +1160,8 @@ export default function App({ playerName, renameName, joinRequest }) {
     }
     const box = wideBboxMode ? CONFIG.bboxWide : CONFIG.bbox
     const withinBbox = (poly) => poly.every(([lat, lng]) => lat >= box.south && lat <= box.north && lng >= box.west && lng <= box.east)
-    // The raw file covers a much wider region (Lévis across the river, plus ~50 smaller outlying
-    // municipalities) than any playable area - restrict to the source data's own `city` field
-    // (precise regardless of geographic overlap) before applying either bbox.
-    const filtered = rawSegments.filter((s) => s.city === 'Québec' && withinBbox(s.polyline))
+    const allowedCities = wideBboxMode ? ['Québec', 'Lévis'] : ['Québec']
+    const filtered = rawSegments.filter((s) => allowedCities.includes(s.city) && withinBbox(s.polyline))
     const builtGraph = buildGraph(filtered)
     graphCacheRef.current[cacheKey] = { segments: filtered, graph: builtGraph }
     setSegments(filtered)

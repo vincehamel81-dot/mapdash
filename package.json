@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "audit:graph": "node scripts/auditGraph.mjs",
     "sync:street-data": "node scripts/syncStreetData.mjs",
-    "assign:neighborhoods": "node scripts/assignNeighborhoods.mjs"
+    "assign:neighborhoods": "node scripts/assignNeighborhoods.mjs",
+    "import:levis": "node scripts/importLevisData.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.2",
