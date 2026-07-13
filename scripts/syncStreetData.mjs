@@ -46,7 +46,13 @@ const converted = []
 for (const f of data.features) {
   const p = f.properties
   if (EXCLUDED_TYPE.has(p.TYPE)) { skippedType++; continue }
-  if (!DRIVABLE_GENERIQUE.has(p.GENERIQUE)) { skippedGeneric++; continue }
+  // GENERIQUE is only a filter when it's actually present - some very real, prominent streets
+  // (Grande Allée Est/Ouest among them - confirmed live, a player found it entirely missing) have
+  // no GENERIQUE at all because their name doesn't follow the usual "Type + Name" pattern, and
+  // treating that absence as "not drivable" wrongly excluded 64 real street segments across 4
+  // streets. TYPE has already excluded the non-drivable categories by this point, so a missing
+  // GENERIQUE with a surviving TYPE is trusted as a real street.
+  if (p.GENERIQUE && !DRIVABLE_GENERIQUE.has(p.GENERIQUE)) { skippedGeneric++; continue }
   if (f.geometry.type !== 'LineString' || f.geometry.coordinates.length < 2) continue
 
   converted.push({
