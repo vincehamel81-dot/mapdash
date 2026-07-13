@@ -1,7 +1,8 @@
-// The 10 official Finder-Keeper collectibles. Each has its own standalone SVG file in
+// The full Finder-Keeper collectible catalog. Each has its own standalone SVG file in
 // src/finderIcons/ - to swap in the real plush-toy artwork, just replace that one file (keep the
-// same filename/viewBox convention: 24x24, stroke="currentColor" so it recolors like everything
-// else) and nothing else in the app needs to change.
+// same filename convention) and nothing else in the app needs to change. Only 10 of these spawn in
+// any given round (see pickRoundFinderItems in App.jsx) - the catalog is expected to keep growing
+// past 10 as more plush toys get their own icon, with each round drawing a random subset.
 import grandNacho from './finderIcons/grand-nacho.svg?raw'
 import nacho from './finderIcons/nacho.svg?raw'
 import simon from './finderIcons/simon.svg?raw'
@@ -12,6 +13,7 @@ import daffodil from './finderIcons/daffodil.svg?raw'
 import tyler from './finderIcons/tyler.svg?raw'
 import bunBun from './finderIcons/bun-bun.svg?raw'
 import grenouche from './finderIcons/grenouche.svg?raw'
+import huskynouche from './finderIcons/huskynouche.svg?raw'
 
 export const FINDER_ITEMS = [
   { id: 'grand-nacho', label: 'Grand Nacho', svg: grandNacho },
@@ -23,7 +25,8 @@ export const FINDER_ITEMS = [
   { id: 'daffodil', label: 'Daffodil', svg: daffodil },
   { id: 'tyler', label: 'Tyler', svg: tyler },
   { id: 'bun-bun', label: 'Bun-bun', svg: bunBun },
-  { id: 'grenouche', label: 'Grenouche', svg: grenouche }
+  { id: 'grenouche', label: 'Grenouche', svg: grenouche },
+  { id: 'huskynouche', label: 'Huskynouche', svg: huskynouche }
 ]
 
 export function getFinderItemSvg(itemId) {

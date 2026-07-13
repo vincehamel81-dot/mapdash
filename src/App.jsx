@@ -118,7 +118,24 @@ const ITEM_BEHAVIORS = {
   // Stays close to Rue des Meuniers, never straying far from it.
   jasper: { type: 'home-anchor', anchorStreetName: 'Rue des Meuniers', radiusMeters: 500 },
   // Hides for the whole round near one of the 4 corners of the playable area - never moves.
-  'bun-bun': { type: 'hidden-corner' }
+  'bun-bun': { type: 'hidden-corner' },
+  // Turns randomly like a normal ambient NPC (falls through pickNextForBehavior's default case),
+  // but its speed multiplier is re-rolled from speedTiers on a random cadence instead of staying
+  // fixed - 0 genuinely means stopped dead (metersPerSecond becomes 0), no separate nap/freeze
+  // logic needed for that.
+  huskynouche: { type: 'variable-speed', speedTiers: [0, 0.4, 1, 2.5], speedChangeMinMs: 4000, speedChangeMaxMs: 10000 }
+}
+
+// Only 10 items spawn per Finder (Roaming/Easy/Hard) round even as the catalog grows past 10 -
+// Fisher-Yates-ish partial shuffle, picks without replacement.
+function pickRoundFinderItems(count) {
+  const pool = [...FINDER_ITEMS]
+  const picked = []
+  while (picked.length < count && pool.length) {
+    const i = Math.floor(Math.random() * pool.length)
+    picked.push(pool.splice(i, 1)[0])
+  }
+  return picked
 }
 
 const CLOUD_DAMAGE_PER_SEC = { white: 30, gray: 100, black: 250 }
@@ -1340,7 +1357,9 @@ export default function App({ playerName, renameName, joinRequest }) {
             })
             if (found) {
               const nextFoundItems = [...live.foundItems, found.id]
-              const wonRound = nextFoundItems.length >= FINDER_ITEMS.length
+              // Against this round's actual spawned item count, not the full catalog - only 10 of
+              // the (growing) FINDER_ITEMS collection get spawned per round (see buildRoundState).
+              const wonRound = nextFoundItems.length >= (room.items || []).length
               live.updateRoom(room.code, (r) => ({
                 ...r,
                 items: r.items.map((i) => (i.id === found.id ? { ...i, foundBy: live.name } : i)),
@@ -1670,7 +1689,7 @@ export default function App({ playerName, renameName, joinRequest }) {
       // one exception even here: it hides near a random corner of the play area for the whole
       // round (see ITEM_BEHAVIORS) and never moves once placed, unlike every other roaming item.
       const items = isFinder && graph
-        ? FINDER_ITEMS.map((def, i) => {
+        ? pickRoundFinderItems(10).map((def, i) => {
             const behavior = ITEM_BEHAVIORS[def.id]
             let pt = null
             if (behavior?.type === 'hidden-corner') {
@@ -2108,7 +2127,20 @@ export default function App({ playerName, renameName, joinRequest }) {
           continue
         }
 
-        const speedMultiplier = behavior.speedMultiplier ?? 1
+        // Huskynouche re-rolls its speed tier on a random cadence instead of holding one fixed
+        // multiplier - 0 genuinely stops it dead (metersPerSecond becomes 0 below), no separate
+        // freeze/nap logic needed for that.
+        let speedMultiplier = behavior.speedMultiplier ?? 1
+        let speedChangeAt = sim.speedChangeAt
+        if (behavior.type === 'variable-speed') {
+          if (!speedChangeAt || Date.now() >= speedChangeAt) {
+            const tiers = behavior.speedTiers ?? [1]
+            speedMultiplier = tiers[Math.floor(Math.random() * tiers.length)]
+            speedChangeAt = Date.now() + behavior.speedChangeMinMs + Math.random() * (behavior.speedChangeMaxMs - behavior.speedChangeMinMs)
+          } else {
+            speedMultiplier = sim.speedMultiplier ?? 1
+          }
+        }
         const metersPerSecond = (edge.speedKmh * 2 * speedMultiplier) / 3.6
         let nextDistanceAlong = sim.distanceAlong + metersPerSecond * dt * sim.direction
         let nextDirection = sim.direction
@@ -2139,7 +2171,9 @@ export default function App({ playerName, renameName, joinRequest }) {
           edgeId: nextEdge.id,
           distanceAlong: nextDistanceAlong,
           direction: nextDirection,
-          napUntil: nextNapUntil
+          napUntil: nextNapUntil,
+          speedMultiplier,
+          speedChangeAt
         }
         const [lat, lng] = getSegmentPosition(nextEdge, nextDistanceAlong)
         const payload = { itemId: item.id, lat, lng }
@@ -2439,7 +2473,7 @@ export default function App({ playerName, renameName, joinRequest }) {
                 {currentRoom.mode === 'survival' ? (
                   <span className="player-status active">{Math.round(isSelf ? health : live?.health ?? player.health ?? 1000)} HP</span>
                 ) : isFinderMode(currentRoom.mode) ? (
-                  <span className="player-status active">{isSelf ? (player.foundItems || []).length : live?.foundCount ?? 0}/{FINDER_ITEMS.length}</span>
+                  <span className="player-status active">{isSelf ? (player.foundItems || []).length : live?.foundCount ?? 0}/{(currentRoom.items || []).length}</span>
                 ) : player.eliminated ? (
                   <span className="player-status">{currentRoom.mode === 'tag' ? 'Caught' : 'Eliminated'}</span>
                 ) : (
@@ -2455,7 +2489,7 @@ export default function App({ playerName, renameName, joinRequest }) {
       </div>
       {isFinderMode(currentRoom.mode) ? (
         <div className="item-tracker">
-          <div className="room-player-title">Items ({(currentPlayer?.foundItems || []).length}/{FINDER_ITEMS.length})</div>
+          <div className="room-player-title">Items ({(currentPlayer?.foundItems || []).length}/{(currentRoom.items || []).length})</div>
           {itemDistances.map((item) => (
             <div key={item.id} className={`item-tracker-item${item.found ? ' item-tracker-found' : ''}`}>
               <span className="item-tracker-icon" style={{ color: selectedColor }} dangerouslySetInnerHTML={{ __html: getFinderItemSvg(item.iconId) }} />

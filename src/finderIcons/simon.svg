@@ -1,17 +1,1 @@
-<svg
-  xmlns="http://www.w3.org/2000/svg"
-  width="24"
-  height="24"
-  viewBox="0 0 24 24"
-  fill="none"
-  stroke="currentColor"
-  stroke-width="2"
-  stroke-linecap="round"
-  stroke-linejoin="round"
->
-  <path d="M13 16a3 3 0 0 1 2.24 5" />
-  <path d="M18 12h.01" />
-  <path d="M18 21h-8a4 4 0 0 1-4-4 7 7 0 0 1 7-7h.2L9.6 6.4a1 1 0 1 1 2.8-2.8L15.8 7h.2c3.3 0 6 2.7 6 6v1a2 2 0 0 1-2 2h-1a3 3 0 0 0-3 3" />
-  <path d="M20 8.54V4a2 2 0 1 0-4 0v3" />
-  <path d="M7.612 12.524a3 3 0 1 0-1.6 4.3" />
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 160" role="img" aria-label="09_bunny.svg"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#fff" stop-opacity=".18"/><stop offset="1" stop-color="#000" stop-opacity=".12"/></linearGradient><radialGradient id="e" cx=".35" cy=".25" r=".75"><stop stop-color="#444"/><stop offset=".35" stop-color="#111"/><stop offset="1"/></radialGradient></defs><ellipse cx="64" cy="146" rx="38" ry="8" opacity=".12"/><ellipse cx="44" cy="24" rx="12" ry="28" fill="#f2f0eb"/><ellipse cx="84" cy="24" rx="12" ry="28" fill="#f2f0eb"/><ellipse cx="44" cy="24" rx="6" ry="21" fill="#ef91aa"/><ellipse cx="84" cy="24" rx="6" ry="21" fill="#ef91aa"/><ellipse cx="64" cy="67" rx="40" ry="38" fill="#f2f0eb"/><circle cx="44" cy="62" r="15" fill="#b44c8b"/><circle cx="44" cy="62" r="11" fill="url(#e)"/><circle cx="40" cy="57" r="3.5" fill="#fff"/><circle cx="47" cy="66" r="1.8" fill="#fff" opacity=".65"/><circle cx="84" cy="62" r="15" fill="#b44c8b"/><circle cx="84" cy="62" r="11" fill="url(#e)"/><circle cx="80" cy="57" r="3.5" fill="#fff"/><circle cx="87" cy="66" r="1.8" fill="#fff" opacity=".65"/><circle cx="64" cy="74" r="4" fill="#e57593"/><ellipse cx="64" cy="121" rx="28" ry="31" fill="#f2f0eb"/><ellipse cx="43" cy="145" rx="17" ry="10" fill="#f2f0eb"/><ellipse cx="85" cy="145" rx="17" ry="10" fill="#f2f0eb"/><path d="M64 100q-7-10-11-2m11 2q7-10 11-2" fill="none" stroke="#2f9d4f" stroke-width="5"/><path d="M54 102q10-7 20 0l-4 35q-6 10-12 0Z" fill="#f28b24"/><path d="M57 112h13m-14 9h12m-10 9h8" stroke="#cc6817" stroke-width="2"/></svg>

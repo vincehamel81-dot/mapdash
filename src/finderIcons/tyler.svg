@@ -1,18 +1,63 @@
-<svg
-  xmlns="http://www.w3.org/2000/svg"
-  width="24"
-  height="24"
-  viewBox="0 0 24 24"
-  fill="none"
-  stroke="currentColor"
-  stroke-width="2"
-  stroke-linecap="round"
-  stroke-linejoin="round"
->
-  <path d="M10 14.66v1.626a2 2 0 0 1-.976 1.696A5 5 0 0 0 7 21.978" />
-  <path d="M14 14.66v1.626a2 2 0 0 0 .976 1.696A5 5 0 0 1 17 21.978" />
-  <path d="M18 9h1.5a1 1 0 0 0 0-5H18" />
-  <path d="M4 22h16" />
-  <path d="M6 9a6 6 0 0 0 12 0V3a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1z" />
-  <path d="M6 9H4.5a1 1 0 0 1 0-5H6" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 160" role="img" aria-label="Rainbow round plush">
+<defs>
+  <radialGradient id="body" cx=".35" cy=".25" r=".8">
+    <stop stop-color="#fff4df"/>
+    <stop offset="1" stop-color="#e7c797"/>
+  </radialGradient>
+  <radialGradient id="eye" cx=".35" cy=".25" r=".8">
+    <stop stop-color="#444"/>
+    <stop offset=".35" stop-color="#111"/>
+    <stop offset="1"/>
+  </radialGradient>
+  <linearGradient id="nose" x1="0" y1="0" x2="0" y2="1">
+    <stop stop-color="#f56cab"/>
+    <stop offset="1" stop-color="#c83e82"/>
+  </linearGradient>
+</defs>
+
+<!-- shadow -->
+<ellipse cx="64" cy="145" rx="42" ry="8" fill="#000" opacity=".12"/>
+
+<!-- rear color tufts -->
+<path d="M25 93q-15 5-16 20 8 8 20 3Z" fill="#27a7df"/>
+<path d="M103 93q15 5 16 20-8 8-20 3Z" fill="#f05d8e"/>
+
+<!-- round body -->
+<path d="M64 18q34 0 45 35 8 23 3 54-4 30-48 35-44-5-48-35-5-31 3-54Q30 18 64 18Z"
+      fill="url(#body)" stroke="#8f6237" stroke-width="2.2"/>
+
+<!-- top pompom -->
+<path d="M48 19q-8-8 1-14 4-7 10-1 5-7 11 0 6-6 10 2 8-1 7 8-3 9-12 10Z"
+      fill="#ff7b22"/>
+<path d="M58 5q8-7 13 2l-1 14H56Z" fill="#ffd62e"/>
+<path d="M68 5q8-4 12 5l-4 12H65Z" fill="#76d445"/>
+<path d="M77 8q8-2 10 7l-7 9H72Z" fill="#269ed7"/>
+
+<!-- side ears -->
+<path d="M20 86q-19 5-18 21 8 9 23 4l10-19Z" fill="#f071a2" stroke="#8f6237" stroke-width="2"/>
+<path d="M108 86q19 5 18 21-8 9-23 4L93 92Z" fill="#8bd83f" stroke="#8f6237" stroke-width="2"/>
+<path d="M8 101q8-7 18-3l-4 10q-9 4-14-7Z" fill="#d9aa35"/>
+<path d="M120 101q-8-7-18-3l4 10q9 4 14-7Z" fill="#d9aa35"/>
+
+<!-- rainbow fringe -->
+<path d="M24 58q7-14 17-9 7-12 16-4 7-12 16-3 8-10 17-1 8-5 15 5 7 5 9 12Z" fill="#7655d9"/>
+<path d="M20 63q9-12 18-5 8-10 17-2 8-8 17 0 8-7 17 1 8-4 17 5l5 9H18Z" fill="#f06ca3"/>
+<path d="M18 71q11-9 20-2 9-8 18 0 9-8 18 0 9-7 18 1 9-5 18 4l2 8H17Z" fill="#ff9b2f"/>
+<path d="M17 81q10-7 20 0 9-7 18 0 9-7 18 0 9-6 18 1 8-4 19 4l-1 9H18Z" fill="#ffd536"/>
+<path d="M18 91q10-6 20 1 9-7 18 0 9-6 18 0 9-5 18 1 8-4 17 3l-4 10H23Z" fill="#91d43f"/>
+
+<!-- eyes -->
+<circle cx="44" cy="103" r="17" fill="#a84fc4"/>
+<circle cx="84" cy="103" r="17" fill="#a84fc4"/>
+<circle cx="44" cy="103" r="12" fill="url(#eye)"/>
+<circle cx="84" cy="103" r="12" fill="url(#eye)"/>
+<circle cx="39" cy="97" r="4" fill="#fff"/>
+<circle cx="79" cy="97" r="4" fill="#fff"/>
+<circle cx="48" cy="108" r="2" fill="#fff" opacity=".7"/>
+<circle cx="88" cy="108" r="2" fill="#fff" opacity=".7"/>
+
+<!-- muzzle and nose -->
+<ellipse cx="64" cy="122" rx="22" ry="16" fill="#f8e8cf"/>
+<path d="M55 118q9-9 18 0-2 8-9 8t-9-8" fill="url(#nose)" stroke="#9f2d6b" stroke-width="1.5"/>
+<circle cx="60" cy="116" r="2.5" fill="#fff" opacity=".85"/>
 </svg>
