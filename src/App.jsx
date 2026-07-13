@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import maplibregl from 'maplibre-gl'
 import MapView from './MapView'
 import { CONFIG, THEMES } from './config'
+import { version as APP_VERSION } from '../package.json'
 import { AVATAR_ICONS, DEFAULT_AVATAR_ID, getAvatarSvg } from './avatarIcons'
 import { FINDER_ITEMS, getFinderItemSvg } from './finderItems'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
@@ -51,6 +52,11 @@ const CLOUD_MOVE_INTERVAL_MS = 7000
 // clustering near one player, so a higher count is needed to keep the field feeling populated.
 const CLOUD_MIN_COUNT = 10
 const CLOUD_MAX_COUNT = 20
+// Survival specifically needs a much denser field to actually be a threat - 12 small clouds
+// scattered over the whole bbox meant a player could drive for a full 10-minute round barely ever
+// overlapping one, health sitting at 1000 the entire time. 100 is deliberately dense.
+const CLOUD_MIN_COUNT_SURVIVAL = 100
+const CLOUD_MAX_COUNT_SURVIVAL = 120
 // Degrees of slack applied to CONFIG.bbox when deciding a drifting cloud has left the playable
 // area (~3km) - generous enough that wind drift only prunes clouds that have genuinely blown well
 // clear of the map, not ones still hovering near its edge.
@@ -72,12 +78,12 @@ const DEBUG_ROUND_MS = (() => {
 // logic (Survival's clouds, Finder's items) stay on the curated tight box for now.
 export const MODE_CONFIG = {
   single: { label: 'Single', roomBased: false, hostGatedStart: false, minPlayers: 1, maxPlayers: 1, roundDurationMs: null, wideBbox: true },
-  team: { label: 'Team', roomBased: true, hostGatedStart: false, minPlayers: 2, maxPlayers: 10, roundDurationMs: null, wideBbox: true },
-  survival: { label: 'Survival', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: DEBUG_ROUND_MS ?? 10 * 60 * 1000 },
-  'finder-easy': { label: 'Finder (Easy)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: null },
-  'finder-roaming': { label: 'Finder (Roaming)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: null },
-  'finder-hard': { label: 'Finder (Hard)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: null },
-  tag: { label: 'Tag', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: DEBUG_ROUND_MS ?? 10 * 60 * 1000 }
+  team: { label: 'Team', roomBased: true, hostGatedStart: false, minPlayers: 2, maxPlayers: 30, roundDurationMs: null, wideBbox: true },
+  survival: { label: 'Survival', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 30, roundDurationMs: DEBUG_ROUND_MS ?? 10 * 60 * 1000 },
+  'finder-easy': { label: 'Finder (Easy)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 30, roundDurationMs: null },
+  'finder-roaming': { label: 'Finder (Roaming)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 30, roundDurationMs: null },
+  'finder-hard': { label: 'Finder (Hard)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 30, roundDurationMs: null },
+  tag: { label: 'Tag', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 30, roundDurationMs: DEBUG_ROUND_MS ?? 10 * 60 * 1000 }
 }
 
 // Every Finder variant shares the same pickup mechanic/roster fields (found-item count, "first to
@@ -375,14 +381,16 @@ function bboxOutlineGeoJSON(box) {
   }
 }
 
-// Most clouds are modest, but occasionally (~15%) spawn a genuinely huge one spanning several
-// street blocks, per the "clouds should feel epic sometimes, not uniformly small" request. The
-// big-cloud ceiling is doubled (220-1000m instead of 220-500m) per direct feedback that even the
-// biggest clouds should be bigger still - small-cloud range and the 15% rarity are unchanged.
-// Survival clouds are twice this size per the mode's rules (sizeMultiplier = 2).
-function randomCloudRadius(sizeMultiplier = 1) {
-  const base = Math.random() < 0.15 ? 220 + Math.random() * 780 : 20 + Math.random() * 70
-  return base * sizeMultiplier
+// Split into two deliberate categories instead of one mixed-probability roll: the ambient spawner
+// (round start + ongoing tick maintenance) only ever produces small clouds now - with 100+ of them
+// in Survival, a 15% chance of also being huge made the field feel chaotic rather than threatening.
+// Big clouds are now exclusively what the "Add cloud" button places, on purpose, one at a time.
+function randomSmallCloudRadius(sizeMultiplier = 1) {
+  return (20 + Math.random() * 70) * sizeMultiplier
+}
+
+function randomBigCloudRadius(sizeMultiplier = 1) {
+  return (220 + Math.random() * 780) * sizeMultiplier
 }
 
 // Clouds should persist for most of a round rather than being pruned after drifting a fixed
@@ -1538,22 +1546,25 @@ export default function App({ playerName, renameName, joinRequest }) {
     return () => window.clearInterval(interval)
   }, [])
 
-  useEffect(() => {
-    // Checked against radiusMeters + a flat 50m safety margin, not just a flat 50m from the
-    // center point - a big cloud (up to ~1000m radius in survival) spawning 51m from a player
-    // would otherwise cover them instantly even though the center point "passed" a flat check.
-    const isTooCloseToAnyPlayer = (lat, lng, radiusMeters) => {
-      const live = liveRef.current
-      const self = positionRef.current
-      const threshold = radiusMeters + 50
-      if (self && haversine([lat, lng], [self.lat, self.lng]) < threshold) return true
-      return Object.values(live.livePositions || {}).some((p) => haversine([lat, lng], [p.lat, p.lng]) < threshold)
-    }
+  // Checked against radiusMeters + a flat 50m safety margin, not just a flat 50m from the center
+  // point - a big cloud (up to ~1000m radius in survival) spawning 51m from a player would
+  // otherwise cover them instantly even though the center point "passed" a flat check. Shared by
+  // the ambient tick spawner and the manual "Add cloud" button, not effect-local, since both need
+  // the same anti-instakill check.
+  const isTooCloseToAnyPlayer = useCallback((lat, lng, radiusMeters) => {
+    const live = liveRef.current
+    const self = positionRef.current
+    const threshold = radiusMeters + 50
+    if (self && haversine([lat, lng], [self.lat, self.lng]) < threshold) return true
+    return Object.values(live.livePositions || {}).some((p) => haversine([lat, lng], [p.lat, p.lng]) < threshold)
+  }, [])
 
+  useEffect(() => {
     const spawnCloud = () => {
       const isSurvival = liveRef.current.currentRoom?.mode === 'survival'
-      // "Almost twice as big, not twice as big" - 1.75x rather than 2x for Survival.
-      const radiusMeters = randomCloudRadius(isSurvival ? 1.75 : 1)
+      // "Almost twice as big, not twice as big" - 1.75x rather than 2x for Survival. Always small -
+      // see randomSmallCloudRadius's comment for why big clouds are now "Add cloud"-only.
+      const radiusMeters = randomSmallCloudRadius(isSurvival ? 1.75 : 1)
       // Retry a few times to avoid spawning right on top of a player; unlike before, give up on
       // this spawn entirely if every attempt is still too close, rather than forcing a bad spawn -
       // a cloud landing directly on a player instantly stripped their health with no way to react.
@@ -1592,34 +1603,38 @@ export default function App({ playerName, renameName, joinRequest }) {
         )
     }
 
+    // Tops up with a while loop (not a single conditional push) so a big shortfall - many clouds
+    // expiring around the same time, or Survival's much higher floor - closes quickly instead of
+    // trickling in at ~1 per tick.
+    const topUp = (list, minCount, maxCount) => {
+      const next = list
+      while (next.length < minCount) {
+        const spawned = spawnCloud()
+        if (!spawned) break
+        next.push(spawned)
+      }
+      if (Math.random() < 0.4) {
+        const spawned = spawnCloud()
+        if (spawned) next.push(spawned)
+      }
+      if (next.length > maxCount) next.splice(0, next.length - maxCount)
+      return next
+    }
+
     const moveClouds = () => {
+      const isSurvival = liveRef.current.currentRoom?.mode === 'survival'
+      const minCount = isSurvival ? CLOUD_MIN_COUNT_SURVIVAL : CLOUD_MIN_COUNT
+      const maxCount = isSurvival ? CLOUD_MAX_COUNT_SURVIVAL : CLOUD_MAX_COUNT
       // Host computes authoritative cloud state and writes it to the room
       if (isRoomHost && currentRoom) {
         const base = Array.isArray(currentRoom.clouds) && currentRoom.clouds.length ? currentRoom.clouds : clouds
-        const next = driftAndPrune(base)
-
-        if (next.length < CLOUD_MIN_COUNT || Math.random() < 0.4) {
-          const spawned = spawnCloud()
-          if (spawned) next.push(spawned)
-        }
-
-        if (next.length > CLOUD_MAX_COUNT) next.splice(0, next.length - CLOUD_MAX_COUNT)
+        const next = topUp(driftAndPrune(base), minCount, maxCount)
         updateRoom(currentRoom.code, (room) => ({ ...room, clouds: next }))
         setClouds(next)
       } else {
         // Non-host clients will receive cloud updates from the room; fallback to local behavior if none exists
         if (!currentRoom?.clouds || !currentRoom.clouds.length) {
-          setClouds((prev) => {
-            const next = driftAndPrune(prev)
-
-            if (next.length < CLOUD_MIN_COUNT || Math.random() < 0.4) {
-              const spawned = spawnCloud()
-              if (spawned) next.push(spawned)
-            }
-
-            if (next.length > CLOUD_MAX_COUNT) next.splice(0, next.length - CLOUD_MAX_COUNT)
-            return next
-          })
+          setClouds((prev) => topUp(driftAndPrune(prev), minCount, maxCount))
         }
       }
     }
@@ -1637,7 +1652,7 @@ export default function App({ playerName, renameName, joinRequest }) {
         id: crypto.randomUUID(),
         lat,
         lng,
-        radiusMeters: randomCloudRadius(),
+        radiusMeters: randomSmallCloudRadius(),
         tier: randomCloudTier(),
         createdAt: Date.now(),
         lifetimeMs: randomCloudLifetimeMs()
@@ -1707,17 +1722,18 @@ export default function App({ playerName, renameName, joinRequest }) {
           })
         : []
       // Survival starts with a dense swarm of small clouds scattered across the bbox instead of
-      // waiting for the ambient spawner to slowly build up from empty, per direct feedback that
-      // the opening moments felt too sparse.
+      // waiting for the ambient spawner to slowly build up from empty - matches
+      // CLOUD_MIN_COUNT_SURVIVAL so the round is immediately as dense as it'll stay all round,
+      // rather than feeling sparse for the first couple minutes while the tick spawner catches up.
       const clouds =
         roomMode === 'survival'
-          ? Array.from({ length: 12 }, () => {
+          ? Array.from({ length: CLOUD_MIN_COUNT_SURVIVAL }, () => {
               const { lat, lng } = randomPointInBbox()
               return {
                 id: crypto.randomUUID(),
                 lat,
                 lng,
-                radiusMeters: (20 + Math.random() * 70) * 1.75,
+                radiusMeters: randomSmallCloudRadius(1.75),
                 tier: randomCloudTier(),
                 createdAt: Date.now(),
                 lifetimeMs: randomCloudLifetimeMs()
@@ -2198,26 +2214,33 @@ export default function App({ playerName, renameName, joinRequest }) {
 
   const addCloud = () => {
     if (cloudCooldown || eliminated) return
-    const anchor = positionRef.current || CONFIG.startPosition
-    const bearing = Math.random() * 360
-    const distance = 150 + Math.random() * 500
-    const [lat, lng] = offsetLatLng([anchor.lat, anchor.lng], bearing, distance)
+    // Deliberately a big cloud (see randomBigCloudRadius) placed randomly across the whole bbox,
+    // not anchored near whoever clicked - "add cloud should add a pretty big cloud too somewhere
+    // in the bbox" per direct feedback, distinct from the small ambient field.
+    const isSurvival = currentRoom?.mode === 'survival'
+    const radiusMeters = randomBigCloudRadius(isSurvival ? 1.75 : 1)
+    let lat, lng
+    for (let attempt = 0; attempt < 10; attempt++) {
+      ;({ lat, lng } = randomPointInBbox())
+      if (!isTooCloseToAnyPlayer(lat, lng, radiusMeters)) break
+    }
     const newCloud = {
       id: crypto.randomUUID(),
       lat,
       lng,
-      radiusMeters: randomCloudRadius(),
+      radiusMeters,
       tier: randomCloudTier(),
       createdAt: Date.now(),
       lifetimeMs: randomCloudLifetimeMs()
     }
+    const maxCount = isSurvival ? CLOUD_MAX_COUNT_SURVIVAL : CLOUD_MAX_COUNT
     // Any room member can add one - not just the host. Non-host clients used to only update their
     // own local `clouds` state, which the very next room sync (mirroring the host's authoritative
     // list) silently overwrote, making the button appear to do nothing.
     if (currentRoom) {
-      updateRoom(currentRoom.code, (room) => ({ ...room, clouds: [...(room.clouds || []), newCloud].slice(-CLOUD_MAX_COUNT) }))
+      updateRoom(currentRoom.code, (room) => ({ ...room, clouds: [...(room.clouds || []), newCloud].slice(-maxCount) }))
     } else {
-      setClouds((prev) => [...prev, newCloud].slice(-CLOUD_MAX_COUNT))
+      setClouds((prev) => [...prev, newCloud].slice(-maxCount))
     }
     setCloudCooldown(true)
     window.setTimeout(() => setCloudCooldown(false), 10000)
@@ -2504,6 +2527,7 @@ export default function App({ playerName, renameName, joinRequest }) {
   return (
     <div className="app-shell">
       <div className="app-sidebar">
+        <div className="app-brand">MapDashRun <span className="app-brand-version">v{APP_VERSION}</span></div>
         {!started && !pickingSpawn ? (
           <div className="setup-modal-backdrop">
             <div className="setup-modal-card">

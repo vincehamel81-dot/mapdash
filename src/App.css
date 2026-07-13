@@ -22,6 +22,32 @@
   overflow-y: auto;
 }
 
+.app-brand {
+  /* Fixed + a z-index above .setup-modal-backdrop's 1500 - the badge lives inside .app-sidebar in
+     the markup, but the setup modal is a fixed full-viewport overlay that would otherwise hide
+     anything sitting behind it in the sidebar. Fixed positioning here keeps it visible on every
+     screen (setup and in-game alike) regardless of what's stacked in the DOM around it. */
+  position: fixed;
+  top: 10px;
+  left: 12px;
+  z-index: 1600;
+  font-weight: 700;
+  font-size: 13px;
+  color: #5f6368;
+  letter-spacing: 0.02em;
+  background: rgba(255,255,255,0.9);
+  padding: 4px 10px;
+  border-radius: 8px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+  pointer-events: none;
+}
+
+.app-brand-version {
+  font-weight: 500;
+  color: #9aa0a6;
+  margin-left: 4px;
+}
+
 .mode-select {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

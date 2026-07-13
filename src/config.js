@@ -46,5 +46,15 @@ export const THEMES = {
     baseNoLabels: cartoTiles('light_nolabels'),
     baseWithLabels: cartoTiles('light_all'),
     attribution: '&copy; OpenStreetMap contributors'
+  },
+  // Esri's free World Street Map service - same provider as the (now-removed) satellite imagery,
+  // so no API key needed, same as the sibling gumballquiz project already proved out. Esri doesn't
+  // publish its own label-free variant of this one, so - reusing that same project's trick -
+  // "no labels" falls back to CARTO's voyager_nolabels instead.
+  esriStreets: {
+    name: 'Esri Streets',
+    baseNoLabels: cartoTiles('voyager_nolabels'),
+    baseWithLabels: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}'],
+    attribution: 'Tiles &copy; Esri &mdash; Source: Esri, HERE, Garmin, USGS, EPA, NPS, and others'
   }
 }
