@@ -1066,6 +1066,78 @@ export function pickRandomNextSegment(graph, nodeKey, currentEdge) {
   return choices[Math.floor(Math.random() * choices.length)]
 }
 
+// Roaming Finder-Keeper items (v1, one per-item personality): the four pickers below are the
+// building blocks each item's behavior config combines. All take the same (graph, nodeKey,
+// currentEdge) shape as pickRandomNextSegment so item movement can share one tick loop that just
+// calls whichever picker that item's personality specifies.
+
+function candidatesAt(graph, nodeKey, currentEdge) {
+  const node = graph.nodes.get(nodeKey)
+  if (!node) return []
+  const refHeading = arrivalHeadingAtNode(currentEdge, nodeKey)
+  return node.edges
+    .filter((edge) => edge.id !== currentEdge.id)
+    .map((edge) => ({ edge, absAngle: Math.abs(signedAngleBetween(refHeading, departureHeadingFromNode(edge, nodeKey))) }))
+}
+
+// Tuffy: fast, mostly straight lines - always takes the smallest-angle (straightest) option.
+export function pickStraightBiasedNextSegment(graph, nodeKey, currentEdge) {
+  const choices = candidatesAt(graph, nodeKey, currentEdge)
+  if (!choices.length) return null
+  return choices.sort((a, b) => a.absAngle - b.absAngle)[0].edge
+}
+
+// Simon: turns left whenever a real left exists, most (not all) of the time - the occasional
+// non-left pick is what keeps him from tracing one perfect circle forever.
+export function pickLeftBiasedNextSegment(graph, nodeKey, currentEdge, leftProbability) {
+  const choices = candidatesAt(graph, nodeKey, currentEdge)
+  if (!choices.length) return null
+  const refHeading = arrivalHeadingAtNode(currentEdge, nodeKey)
+  const lefts = choices.filter((c) => signedAngleBetween(refHeading, departureHeadingFromNode(c.edge, nodeKey)) > 10)
+  if (lefts.length && Math.random() < leftProbability) {
+    return lefts.sort((a, b) => a.absAngle - b.absAngle)[0].edge
+  }
+  return choices[Math.floor(Math.random() * choices.length)].edge
+}
+
+// Nacho: oscillates along one named street - prefers continuing on it, and only ever leaves it
+// (picks something else) when it truly runs out (a real end, per the graph).
+export function pickOscillatingNextSegment(graph, nodeKey, currentEdge, streetNamePrefix) {
+  const choices = candidatesAt(graph, nodeKey, currentEdge)
+  if (!choices.length) return null
+  const onStreet = choices.filter((c) => (c.edge.name || '').startsWith(streetNamePrefix))
+  const pool = onStreet.length ? onStreet : choices
+  return pool.sort((a, b) => a.absAngle - b.absAngle)[0].edge
+}
+
+// Flora/Jasper: stays near a home point. Strict once at/beyond the radius (always heads back
+// toward the anchor, no exceptions) - a softer "mostly greedy, sometimes random among all
+// candidates" version was confirmed live to let real drift accumulate over many intersections
+// (an item could wander more than 2x its intended radius from home over a couple of minutes).
+// Only wanders freely while genuinely still within radius, so it explores its neighborhood
+// instead of tracing the exact same shortest path back and forth every time.
+export function pickHomeAnchoredNextSegment(graph, nodeKey, currentEdge, anchorCoord, radiusMeters) {
+  const node = graph.nodes.get(nodeKey)
+  if (!node) return null
+  const choices = node.edges.filter((edge) => edge.id !== currentEdge.id)
+  if (!choices.length) return null
+  const distanceFromAnchor = (edge) => {
+    const farKey = edge.startKey === nodeKey ? edge.endKey : edge.startKey
+    const farNode = graph.nodes.get(farKey)
+    return farNode ? haversine(anchorCoord, farNode.coord) : Infinity
+  }
+  const currentDistanceFromAnchor = haversine(anchorCoord, node.coord)
+  const withinRadius = choices.filter((edge) => distanceFromAnchor(edge) <= radiusMeters)
+
+  if (currentDistanceFromAnchor >= radiusMeters || !withinRadius.length) {
+    return choices.slice().sort((a, b) => distanceFromAnchor(a) - distanceFromAnchor(b))[0]
+  }
+  if (Math.random() < 0.3) {
+    return withinRadius.slice().sort((a, b) => distanceFromAnchor(a) - distanceFromAnchor(b))[0]
+  }
+  return withinRadius[Math.floor(Math.random() * withinRadius.length)]
+}
+
 // Resolve where the car ends up on `edge` when entering it at `entryNodeKey` after
 // traveling `remainder` meters past the end of the previous segment. Segments store an
 // arbitrary polyline direction (unrelated to travel direction), so entering at the edge's

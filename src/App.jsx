@@ -22,7 +22,11 @@ import {
   haversine,
   pickRandomStreetPoint,
   findRiskyIntersections,
-  pickRandomNextSegment
+  pickRandomNextSegment,
+  pickStraightBiasedNextSegment,
+  pickLeftBiasedNextSegment,
+  pickOscillatingNextSegment,
+  pickHomeAnchoredNextSegment
 } from './mapUtils'
 import { pickNpcName } from './npcNames'
 import './App.css'
@@ -59,8 +63,20 @@ export const MODE_CONFIG = {
   team: { label: 'Team', roomBased: true, hostGatedStart: false, minPlayers: 2, maxPlayers: 10, roundDurationMs: null },
   survival: { label: 'Survival', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: DEBUG_ROUND_MS ?? 10 * 60 * 1000 },
   'finder-easy': { label: 'Finder (Easy)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: null },
+  'finder-roaming': { label: 'Finder (Roaming)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: null },
   'finder-hard': { label: 'Finder (Hard)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: null },
   tag: { label: 'Tag', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: DEBUG_ROUND_MS ?? 10 * 60 * 1000 }
+}
+
+// Every Finder variant shares the same pickup mechanic/roster fields (found-item count, "first to
+// 10" win); Easy and Roaming additionally both show item icons+labels on the map (Hard is
+// distance-list only) - these two predicates are what every finder-specific check below branches
+// on, instead of repeating the mode-name list at each call site.
+function isFinderMode(mode) {
+  return mode === 'finder-easy' || mode === 'finder-roaming' || mode === 'finder-hard'
+}
+function showsItemIcons(mode) {
+  return mode === 'finder-easy' || mode === 'finder-roaming'
 }
 
 // Ambient NPC drivers (v1): real simulated movement on the street graph (see
@@ -69,13 +85,37 @@ export const MODE_CONFIG = {
 // position, same ephemeral broadcast channel as a real player's own position (never persisted).
 const NPC_TICK_MS = 200
 
+// Roaming Finder items (Finder (Roaming) mode only): each of the 10 items has its own movement
+// personality instead of sitting still. Same host-only-simulates-and-broadcasts model as NPCs -
+// see the item tick effect below. Anchors (home point + radius) are resolved once per round from
+// the real street graph/quartier data, not hardcoded coordinates.
+const ITEM_TICK_MS = 200
+const ITEM_BEHAVIORS = {
+  'grand-nacho': { type: 'ambient' },
+  daffodil: { type: 'ambient' },
+  tyler: { type: 'ambient' },
+  grenouche: { type: 'ambient' },
+  // Oscillates the length of 1re Avenue, bouncing at its real ends.
+  nacho: { type: 'oscillate', streetNamePrefix: '1re Avenue', speedMultiplier: 1 },
+  // Fast, straight-line-biased, always "Turbo".
+  tuffy: { type: 'straight', speedMultiplier: 2 },
+  // Turns left ~75% of the time a real left exists - tends toward looping/circling.
+  simon: { type: 'left-biased', leftProbability: 0.75, speedMultiplier: 1 },
+  // Stays within the Sainte-Foy-Sillery-Cap-Rouge arrondissement, napping 15-30s at a time.
+  flora: { type: 'home-anchor', anchorArrondissement: 'Sainte-Foy–Sillery–Cap-Rouge', radiusMeters: 1400, napMinMs: 15000, napMaxMs: 30000 },
+  // Stays close to Rue des Meuniers, never straying far from it.
+  jasper: { type: 'home-anchor', anchorStreetName: 'Rue des Meuniers', radiusMeters: 500 },
+  // Hides for the whole round near one of the 4 corners of the playable area - never moves.
+  'bun-bun': { type: 'hidden-corner' }
+}
+
 const CLOUD_DAMAGE_PER_SEC = { white: 30, gray: 100, black: 250 }
 const FINDER_PICKUP_RADIUS_METERS = 15
 const TAG_CONTACT_RADIUS_METERS = 8
 
-// Finished rooms auto-restart within ~3s if the host is still around (see the auto-restart
-// effect below) - one that's stayed 'finished' well past that is almost certainly abandoned
-// (host disconnected), so hide it from the join list rather than leaving it joinable forever.
+// A finished room just sits there until whoever's in it leaves (no auto-restart - see the
+// round-finish report panel) - one that's stayed 'finished' this long is almost certainly
+// abandoned (host disconnected without anyone leaving), so hide it from the join list.
 function isRoomStale(room) {
   return room.status === 'finished' && Date.now() - (room.updatedAt || 0) > 60000
 }
@@ -93,7 +133,7 @@ function resetPlayersForRound(players, mode) {
   if (mode === 'survival') {
     return { players: next.map((p) => ({ ...p, health: 1000 })), itName }
   }
-  if (mode === 'finder-easy' || mode === 'finder-hard') {
+  if (isFinderMode(mode)) {
     return { players: next.map((p) => ({ ...p, foundItems: [] })), itName }
   }
   if (mode === 'tag') {
@@ -104,6 +144,44 @@ function resetPlayersForRound(players, mode) {
     return { players: next.map((p) => ({ ...p, isIt: p.name === itName })), itName }
   }
   return { players: next, itName }
+}
+
+// Resolves a roaming item's home-anchor personality (Flora/Jasper) to a real coordinate, once per
+// round - by arrondissement (a whole neighborhood, for Flora) or by a specific street name (for
+// Jasper). Falls back to any real point rather than crashing if the configured area/street isn't
+// found in the current graph (e.g. after a future street-data resync renames something).
+function resolveAnchorCoord(graph, behavior) {
+  const edges = Array.from(graph.edges.values())
+  const pickFrom = (candidates) => {
+    const edge = candidates[Math.floor(Math.random() * candidates.length)]
+    return edge.polyline[Math.floor(Math.random() * edge.polyline.length)]
+  }
+  if (behavior.anchorArrondissement) {
+    const candidates = edges.filter((e) => e.arrondissement === behavior.anchorArrondissement)
+    if (candidates.length) return pickFrom(candidates)
+  }
+  if (behavior.anchorStreetName) {
+    const candidates = edges.filter((e) => e.name === behavior.anchorStreetName)
+    if (candidates.length) return pickFrom(candidates)
+  }
+  return pickFrom(edges)
+}
+
+// Dispatches to whichever mapUtils picker matches this item's personality - the roaming item tick
+// effect below stays the same for every item regardless of which one this returns.
+function pickNextForBehavior(graph, nodeKey, currentEdge, behavior, sim) {
+  switch (behavior.type) {
+    case 'straight':
+      return pickStraightBiasedNextSegment(graph, nodeKey, currentEdge)
+    case 'left-biased':
+      return pickLeftBiasedNextSegment(graph, nodeKey, currentEdge, behavior.leftProbability ?? 0.75)
+    case 'oscillate':
+      return pickOscillatingNextSegment(graph, nodeKey, currentEdge, behavior.streetNamePrefix)
+    case 'home-anchor':
+      return pickHomeAnchoredNextSegment(graph, nodeKey, currentEdge, sim.anchorCoord, behavior.radiusMeters)
+    default:
+      return pickRandomNextSegment(graph, nodeKey, currentEdge)
+  }
 }
 
 function formatDuration(ms) {
@@ -650,6 +728,10 @@ export default function App({ playerName, renameName, joinRequest }) {
   const roomChannelRef = useRef(null)
   const lastBroadcastRef = useRef(0)
   const [livePositions, setLivePositions] = useState({})
+  // Roaming Finder items' live positions (Finder (Roaming) only) - same ephemeral-broadcast model
+  // as livePositions above, keyed by item id instead of player name. Never touches the database;
+  // room.items' own lat/lng stays as each item's round-start spawn point only.
+  const [liveItemPositions, setLiveItemPositions] = useState({})
 
   // Survival health - changes every frame, so (like position) it never touches Postgres per-tick;
   // it rides the same throttled broadcast and is only persisted once, by the host, at round end.
@@ -683,6 +765,7 @@ export default function App({ playerName, renameName, joinRequest }) {
     liveRef.current = {
       currentRoom,
       livePositions,
+      liveItemPositions,
       clouds,
       eliminated,
       foundItems: currentPlayer?.foundItems || [],
@@ -695,6 +778,7 @@ export default function App({ playerName, renameName, joinRequest }) {
   // database - only room structure (roster/status/clouds) is persisted via useRoomSync.
   useEffect(() => {
     setLivePositions({})
+    setLiveItemPositions({})
     if (!isSupabaseConfigured || !joinedRoomCode) {
       roomChannelRef.current = null
       return
@@ -703,6 +787,13 @@ export default function App({ playerName, renameName, joinRequest }) {
     channel.on('broadcast', { event: 'position' }, ({ payload }) => {
       if (!payload || payload.name === name) return
       setLivePositions((prev) => ({ ...prev, [payload.name]: payload }))
+    })
+    // Roaming Finder items broadcast on a separate event (not keyed by player name) - see the item
+    // tick effect below. Every client (not just the host simulating them) needs these to render the
+    // items' actual current position and to check pickups against where they really are.
+    channel.on('broadcast', { event: 'item-position' }, ({ payload }) => {
+      if (!payload?.itemId) return
+      setLiveItemPositions((prev) => ({ ...prev, [payload.itemId]: payload }))
     })
     channel.subscribe()
     roomChannelRef.current = channel
@@ -733,11 +824,17 @@ export default function App({ playerName, renameName, joinRequest }) {
       return
     }
 
-    if (currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard') {
+    if (isFinderMode(currentRoom.mode)) {
       if (currentRoom.status === 'waiting') {
         setGameMessage('Waiting for another player to join...')
       } else {
-        setGameMessage(currentRoom.mode === 'finder-easy' ? 'Find all 10 items - watch for their icons on the map!' : 'Find all 10 items - only the distance list can help you.')
+        setGameMessage(
+          currentRoom.mode === 'finder-easy'
+            ? 'Find all 10 items - watch for their icons on the map!'
+            : currentRoom.mode === 'finder-roaming'
+            ? 'Find all 10 items - they move, so watch for their icons on the map!'
+            : 'Find all 10 items - only the distance list can help you.'
+        )
       }
       return
     }
@@ -772,6 +869,11 @@ export default function App({ playerName, renameName, joinRequest }) {
   // { edgeId, distanceAlong, direction }. Never persisted or broadcast itself - only the resulting
   // lat/lng gets broadcast (see the NPC tick effect below), same as a real player's own position.
   const npcSimRef = useRef({})
+  // Host-only local simulation state for every roaming Finder item (Finder (Roaming) mode only):
+  // item id -> { edgeId, distanceAlong, direction, anchorCoord?, napUntil? }. anchorCoord is
+  // resolved once (on first tick) and cached here for home-anchor personalities (Flora, Jasper) -
+  // re-resolving it every tick would be wasted work since the anchor never moves.
+  const itemSimRef = useRef({})
   // Always holds the freshest leaveRoom (synced by an effect right after it's declared below) -
   // quitGame calls through this instead of leaveRoom directly, since a real bug was traced to
   // exactly this staleness: quitGame's own deps deliberately exclude leaveRoom (it's declared
@@ -1175,11 +1277,17 @@ export default function App({ playerName, renameName, joinRequest }) {
               healthRef.current = Math.min(1000, healthRef.current + (1 / 3) * dt) // "+1 every 3s"
             }
             setHealth(healthRef.current)
-          } else if ((room.mode === 'finder-easy' || room.mode === 'finder-hard') && !live.eliminated) {
+          } else if (isFinderMode(room.mode) && !live.eliminated) {
             const unfound = (room.items || []).filter((item) => !live.foundItems.includes(item.id))
-            const found = unfound.find(
-              (item) => haversine([posObj.lat, posObj.lng], [item.lat, item.lng]) <= FINDER_PICKUP_RADIUS_METERS
-            )
+            // Roaming items' real position is wherever they've actually walked to (broadcast, like
+            // a player's own position) - the item's stored lat/lng is just its round-start spawn,
+            // stale the moment it starts moving, so prefer the live one when there is one.
+            const found = unfound.find((item) => {
+              const liveItemPos = live.liveItemPositions?.[item.id]
+              const lat = liveItemPos?.lat ?? item.lat
+              const lng = liveItemPos?.lng ?? item.lng
+              return haversine([posObj.lat, posObj.lng], [lat, lng]) <= FINDER_PICKUP_RADIUS_METERS
+            })
             if (found) {
               const nextFoundItems = [...live.foundItems, found.id]
               const wonRound = nextFoundItems.length >= FINDER_ITEMS.length
@@ -1486,13 +1594,27 @@ export default function App({ playerName, renameName, joinRequest }) {
   const buildRoundState = useCallback(
     (players, roomMode) => {
       const { players: nextPlayers, itName } = resetPlayersForRound(players, roomMode)
-      const isFinder = roomMode === 'finder-easy' || roomMode === 'finder-hard'
+      const isFinder = isFinderMode(roomMode)
       // Uniform across the whole playable bbox (not anchored to any one player's spawn) - a room
       // has multiple players starting at different points, so biasing toward a single anchor
-      // unfairly favored whoever's position happened to trigger the round build.
+      // unfairly favored whoever's position happened to trigger the round build. Bun-bun is the
+      // one exception even here: it hides near a random corner of the play area for the whole
+      // round (see ITEM_BEHAVIORS) and never moves once placed, unlike every other roaming item.
       const items = isFinder && graph
         ? FINDER_ITEMS.map((def, i) => {
-            const pt = pickRandomStreetPoint(graph) || defaultPosition
+            const behavior = ITEM_BEHAVIORS[def.id]
+            let pt = null
+            if (behavior?.type === 'hidden-corner') {
+              const corners = [
+                [CONFIG.bbox.north, CONFIG.bbox.west],
+                [CONFIG.bbox.north, CONFIG.bbox.east],
+                [CONFIG.bbox.south, CONFIG.bbox.west],
+                [CONFIG.bbox.south, CONFIG.bbox.east]
+              ]
+              const corner = corners[Math.floor(Math.random() * corners.length)]
+              pt = pickRandomStreetPoint(graph, { near: corner, maxDistanceMeters: 4000 })
+            }
+            pt = pt || pickRandomStreetPoint(graph) || defaultPosition
             return { id: `item-${i}-${crypto.randomUUID()}`, iconId: def.id, label: def.label, lat: pt.lat, lng: pt.lng, foundBy: null }
           })
         : []
@@ -1836,6 +1958,109 @@ export default function App({ playerName, renameName, joinRequest }) {
     return () => window.clearInterval(interval)
   }, [isRoomHost, joinedRoomCode, graph])
 
+  // Host-only roaming Finder item movement (Finder (Roaming) only) - each item drives using
+  // whichever personality ITEM_BEHAVIORS gives it (see pickNextForBehavior). Bun-bun is excluded
+  // entirely (type 'hidden-corner') - it never moves once placed at round start, so it never needs
+  // a broadcast at all; its round-start spawn point in room.items already is its final position.
+  useEffect(() => {
+    if (!isRoomHost || !joinedRoomCode || !graph) return
+    const interval = window.setInterval(() => {
+      const room = liveRef.current.currentRoom
+      if (!room || room.mode !== 'finder-roaming' || room.status !== 'playing') return
+      const items = (room.items || []).filter((item) => ITEM_BEHAVIORS[item.iconId]?.type !== 'hidden-corner')
+      const activeIds = new Set(items.map((item) => item.id))
+      for (const key of Object.keys(itemSimRef.current)) {
+        if (!activeIds.has(key)) delete itemSimRef.current[key]
+      }
+      if (!items.length) return
+
+      const dt = ITEM_TICK_MS / 1000
+      for (const item of items) {
+        const behavior = ITEM_BEHAVIORS[item.iconId] || { type: 'ambient' }
+        let sim = itemSimRef.current[item.id]
+        if (!sim) {
+          // Home-anchor items (Flora, Jasper) must SPAWN near their anchor too, not anywhere in
+          // the city - picking a fully random starting edge first (then trying to walk it home
+          // over time) let them start many kilometers away, which the radius-containment logic
+          // then spent the whole round just walking back from instead of actually staying put.
+          let edges = Array.from(graph.edges.values())
+          let anchorCoord = null
+          if (behavior.type === 'home-anchor') {
+            anchorCoord = resolveAnchorCoord(graph, behavior)
+            const nearby = edges.filter((e) => {
+              const farNode = graph.nodes.get(e.endKey)
+              return farNode && haversine(anchorCoord, farNode.coord) <= behavior.radiusMeters
+            })
+            if (nearby.length) edges = nearby
+          }
+          if (!edges.length) continue
+          const edge = edges[Math.floor(Math.random() * edges.length)]
+          sim = { edgeId: edge.id, distanceAlong: Math.random() * edge.lengthMeters, direction: Math.random() < 0.5 ? 1 : -1 }
+          if (anchorCoord) sim.anchorCoord = anchorCoord
+          itemSimRef.current[item.id] = sim
+        }
+
+        // Napping (Flora): frozen in place until napUntil passes, but still broadcasts its current
+        // spot so it doesn't just vanish from other players' screens while asleep.
+        if (sim.napUntil && Date.now() < sim.napUntil) {
+          const edge = graph.edges.get(sim.edgeId)
+          if (edge) {
+            const [lat, lng] = getSegmentPosition(edge, sim.distanceAlong)
+            const payload = { itemId: item.id, lat, lng }
+            roomChannelRef.current?.send({ type: 'broadcast', event: 'item-position', payload })
+            setLiveItemPositions((prev) => ({ ...prev, [item.id]: payload }))
+          }
+          continue
+        }
+
+        const edge = graph.edges.get(sim.edgeId)
+        if (!edge) {
+          delete itemSimRef.current[item.id]
+          continue
+        }
+
+        const speedMultiplier = behavior.speedMultiplier ?? 1
+        const metersPerSecond = (edge.speedKmh * 2 * speedMultiplier) / 3.6
+        let nextDistanceAlong = sim.distanceAlong + metersPerSecond * dt * sim.direction
+        let nextDirection = sim.direction
+        let nextEdge = edge
+        let nextNapUntil = sim.napUntil
+
+        const overflowing = sim.direction === 1 ? nextDistanceAlong > edge.lengthMeters : nextDistanceAlong < 0
+        if (overflowing) {
+          const remainder = sim.direction === 1 ? nextDistanceAlong - edge.lengthMeters : -nextDistanceAlong
+          const exitNodeKey = sim.direction === 1 ? edge.endKey : edge.startKey
+          const picked = pickNextForBehavior(graph, exitNodeKey, edge, behavior, sim)
+          if (picked) {
+            nextEdge = picked
+            const entry = resolveEdgeEntry(picked, exitNodeKey, remainder)
+            nextDistanceAlong = entry.distanceAlong
+            nextDirection = entry.direction
+          } else {
+            nextDistanceAlong = sim.direction === 1 ? edge.lengthMeters : 0
+            nextDirection = -sim.direction
+          }
+          if (behavior.type === 'home-anchor' && behavior.napMinMs) {
+            nextNapUntil = Date.now() + behavior.napMinMs + Math.random() * (behavior.napMaxMs - behavior.napMinMs)
+          }
+        }
+
+        itemSimRef.current[item.id] = {
+          ...sim,
+          edgeId: nextEdge.id,
+          distanceAlong: nextDistanceAlong,
+          direction: nextDirection,
+          napUntil: nextNapUntil
+        }
+        const [lat, lng] = getSegmentPosition(nextEdge, nextDistanceAlong)
+        const payload = { itemId: item.id, lat, lng }
+        roomChannelRef.current?.send({ type: 'broadcast', event: 'item-position', payload })
+        setLiveItemPositions((prev) => ({ ...prev, [item.id]: payload }))
+      }
+    }, ITEM_TICK_MS)
+    return () => window.clearInterval(interval)
+  }, [isRoomHost, joinedRoomCode, graph])
+
   // "Join" from ChatPanel: App and ChatPanel are sibling components with no shared state, so
   // main.jsx lifts one small piece of cross-component command state - `joinRequest` - and this
   // effect just forwards it into the existing joinRoom flow (which already applies every normal
@@ -1905,7 +2130,7 @@ export default function App({ playerName, renameName, joinRequest }) {
   // Finder (Easy) only - item markers on the map, same project-to-% recipe as screenPlayers above.
   // Hard mode simply never computes this, which is the entire easy/hard visibility difference.
   const screenItems = useMemo(() => {
-    if (currentRoom?.mode !== 'finder-easy' || !mapRef.current) return []
+    if (!showsItemIcons(currentRoom?.mode) || !mapRef.current) return []
     try {
       const map = mapRef.current
       const container = map.getContainer()
@@ -1915,14 +2140,19 @@ export default function App({ playerName, renameName, joinRequest }) {
       return (currentRoom.items || [])
         .filter((item) => !foundIds.includes(item.id))
         .map((item) => {
-          const point = map.project([item.lng, item.lat])
+          // Roaming items' real position is wherever they've actually walked to (broadcast) - the
+          // stored lat/lng is just the round-start spawn, stale the instant a roaming item moves.
+          const live = liveItemPositions[item.id]
+          const lat = live?.lat ?? item.lat
+          const lng = live?.lng ?? item.lng
+          const point = map.project([lng, lat])
           return { id: item.id, iconId: item.iconId, label: item.label, screenX: (point.x / width) * 100, screenY: (point.y / height) * 100 }
         })
     } catch {
       return []
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentRoom, currentPlayer, mapViewTick])
+  }, [currentRoom, currentPlayer, liveItemPositions, mapViewTick])
 
   // Off-screen "radar" indicators - Finder (Easy) items not currently on-screen, and in Tag
   // whichever direction actually matters for the player driving right now: It sees every other
@@ -1930,9 +2160,9 @@ export default function App({ playerName, renameName, joinRequest }) {
   // avoid. Reuses the same map.project() pixel projection screenItems/screenPlayers already do.
   const radarTargets = useMemo(() => {
     if (!currentRoom || !mapRef.current) return []
-    const isFinderEasy = currentRoom.mode === 'finder-easy'
+    const showsIcons = showsItemIcons(currentRoom.mode)
     const isTag = currentRoom.mode === 'tag'
-    if (!isFinderEasy && !isTag) return []
+    if (!showsIcons && !isTag) return []
     try {
       const map = mapRef.current
       const container = map.getContainer()
@@ -1941,11 +2171,12 @@ export default function App({ playerName, renameName, joinRequest }) {
       const margin = 44
       const targets = []
 
-      if (isFinderEasy) {
+      if (showsIcons) {
         const foundIds = currentPlayer?.foundItems || []
         for (const item of currentRoom.items || []) {
           if (foundIds.includes(item.id)) continue
-          const point = map.project([item.lng, item.lat])
+          const live = liveItemPositions[item.id]
+          const point = map.project([live?.lng ?? item.lng, live?.lat ?? item.lat])
           const edge = computeEdgeIndicator(point.x, point.y, width, height, margin)
           if (!edge) continue
           targets.push({
@@ -2001,19 +2232,20 @@ export default function App({ playerName, renameName, joinRequest }) {
       return []
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentRoom, currentPlayer, name, eliminated, livePositions, mapViewTick])
+  }, [currentRoom, currentPlayer, name, eliminated, livePositions, liveItemPositions, mapViewTick])
 
   const itemDistances = useMemo(() => {
-    if (!currentRoom || !(currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard')) return []
+    if (!isFinderMode(currentRoom?.mode)) return []
     const foundIds = currentPlayer?.foundItems || []
     return (currentRoom.items || [])
-      .map((item) => ({
-        ...item,
-        found: foundIds.includes(item.id),
-        distanceMeters: haversine([position.lat, position.lng], [item.lat, item.lng])
-      }))
+      .map((item) => {
+        const live = liveItemPositions[item.id]
+        const lat = live?.lat ?? item.lat
+        const lng = live?.lng ?? item.lng
+        return { ...item, found: foundIds.includes(item.id), distanceMeters: haversine([position.lat, position.lng], [lat, lng]) }
+      })
       .sort((a, b) => (a.found === b.found ? a.distanceMeters - b.distanceMeters : a.found ? 1 : -1))
-  }, [currentRoom, currentPlayer, position])
+  }, [currentRoom, currentPlayer, position, liveItemPositions])
 
   const roundRemainingLabel = useMemo(() => {
     const durationMs = currentRoom ? MODE_CONFIG[currentRoom.mode]?.roundDurationMs : null
@@ -2036,7 +2268,7 @@ export default function App({ playerName, renameName, joinRequest }) {
   // order as-is, there's no single "score" to rank Tag/Team by.
   const sortedRosterPlayers = useMemo(() => {
     if (!currentRoom?.players?.length) return currentRoom?.players || []
-    const rankable = currentRoom.mode === 'survival' || currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard'
+    const rankable = currentRoom.mode === 'survival' || isFinderMode(currentRoom.mode)
     if (!rankable) return currentRoom.players
     const scoreFor = (p) => {
       if (currentRoom.mode === 'survival') {
@@ -2106,7 +2338,7 @@ export default function App({ playerName, renameName, joinRequest }) {
               <span className="room-player-actions">
                 {currentRoom.mode === 'survival' ? (
                   <span className="player-status active">{Math.round(isSelf ? health : live?.health ?? player.health ?? 1000)} HP</span>
-                ) : currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard' ? (
+                ) : isFinderMode(currentRoom.mode) ? (
                   <span className="player-status active">{isSelf ? (player.foundItems || []).length : live?.foundCount ?? 0}/{FINDER_ITEMS.length}</span>
                 ) : player.eliminated ? (
                   <span className="player-status">{currentRoom.mode === 'tag' ? 'Caught' : 'Eliminated'}</span>
@@ -2121,7 +2353,7 @@ export default function App({ playerName, renameName, joinRequest }) {
           )
         })}
       </div>
-      {currentRoom.mode === 'finder-easy' || currentRoom.mode === 'finder-hard' ? (
+      {isFinderMode(currentRoom.mode) ? (
         <div className="item-tracker">
           <div className="room-player-title">Items ({(currentPlayer?.foundItems || []).length}/{FINDER_ITEMS.length})</div>
           {itemDistances.map((item) => (
