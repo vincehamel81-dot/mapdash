@@ -211,6 +211,14 @@ export default function ChatPanel({ myName, onRequestJoin }) {
   )
 
   const draftInputRef = useRef(null)
+  const messagesEndRef = useRef(null)
+
+  // Keeps the feed pinned to the newest message - both when new ones arrive and when the panel
+  // is (re)opened, since messages can keep arriving while it's closed.
+  useEffect(() => {
+    if (!open) return
+    messagesEndRef.current?.scrollIntoView({ block: 'end' })
+  }, [open, messages])
 
   const toggleOpen = () => {
     setOpen((o) => {
@@ -328,6 +336,7 @@ export default function ChatPanel({ myName, onRequestJoin }) {
                     <span>{m.body}</span>
                   </div>
                 ))}
+                <div ref={messagesEndRef} />
               </div>
               <form className="chat-compose" onSubmit={sendMessage}>
                 <input ref={draftInputRef} value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Say something..." maxLength={500} />

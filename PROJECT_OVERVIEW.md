@@ -91,7 +91,7 @@ Defined in `MODE_CONFIG` (`App.jsx`):
 | Survival | Yes | Yes | 2/10 | 10 min |
 | Finder (Easy) | Yes | Yes | 2/10 | untimed (first to 10 wins) |
 | Finder (Hard) | Yes | Yes | 2/10 | untimed |
-| Tag | Yes | Yes | 2/10 | 5 min |
+| Tag | Yes | Yes | 2/10 | 10 min |
 
 Max players raised from 4/6 to a uniform 10 across every room-based mode to make room for NPCs
 (see below) — this applies even in an all-human room, not just NPC-filled ones. NPCs count toward
@@ -105,13 +105,15 @@ both `maxPlayers` and `minPlayers`, so a host can start a round solo-with-bots-f
 - **Finder-Keeper** (Easy/Hard): find all 10 named collectible items scattered on the street graph.
   Easy shows item icons+labels on the map; Hard only shows a distance sidebar, no map markers.
   First to 10 wins.
-- **Tag**: one random player starts as "It" (1.5x speed), eliminates others on contact
-  (`TAG_CONTACT_RADIUS_METERS`), 5-minute timer.
+- **Tag**: one random player starts as "It" (2x speed), eliminates others on contact
+  (`TAG_CONTACT_RADIUS_METERS`), 10-minute timer.
 - Turbo (hold Shift, or the on-screen button) doubles speed in every mode except Tag.
-- A room with nobody in it drops to zero players and gets deleted (see Room lifecycle below); a
-  finished host-gated room auto-restarts ~3s later if the host is still connected, otherwise it
-  sits `'finished'` and is hidden from the "Available rooms" browse list after 60s of staleness
-  (not deleted, just hidden — the row still exists).
+- **No auto-restart, no restart button at all** (by explicit design) — when a round ends, everyone
+  still in the room sees a report (winner(s), total round time) and leaves at their own pace via an
+  explicit "Leave room" button; wanting to play again means creating/joining a fresh room. A room
+  with nobody in it drops to zero players and gets deleted (see Room lifecycle below); a finished
+  room otherwise just sits `'finished'` and is hidden from the "Available rooms" browse list after
+  60s of staleness (not deleted, just hidden — the row still exists).
 
 ### Room lifecycle / sync internals worth knowing before touching this code
 

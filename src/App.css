@@ -233,6 +233,16 @@
   border: 1px solid #f7c16e;
 }
 
+.room-finished-title {
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.room-finished-time {
+  font-size: 0.85rem;
+  color: #5f6368;
+}
+
 .leave-room {
   background: #ffffff;
   color: #202124;
@@ -654,24 +664,6 @@
   top: 100%;
   margin-bottom: 0;
   margin-top: 4px;
-}
-
-.countdown-overlay {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  z-index: 900;
-  background: rgba(0,0,0,0.7);
-  color: #fff;
-  font-size: 72px;
-  width: 160px;
-  height: 160px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 999px;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.45);
 }
 
 body, html, #root {

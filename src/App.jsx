@@ -60,7 +60,7 @@ export const MODE_CONFIG = {
   survival: { label: 'Survival', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: DEBUG_ROUND_MS ?? 10 * 60 * 1000 },
   'finder-easy': { label: 'Finder (Easy)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: null },
   'finder-hard': { label: 'Finder (Hard)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: null },
-  tag: { label: 'Tag', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: DEBUG_ROUND_MS ?? 5 * 60 * 1000 }
+  tag: { label: 'Tag', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 10, roundDurationMs: DEBUG_ROUND_MS ?? 10 * 60 * 1000 }
 }
 
 // Ambient NPC drivers (v1): real simulated movement on the street graph (see
@@ -104,6 +104,13 @@ function resetPlayersForRound(players, mode) {
     return { players: next.map((p) => ({ ...p, isIt: p.name === itName })), itName }
   }
   return { players: next, itName }
+}
+
+function formatDuration(ms) {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
 }
 
 function escapeHtml(text) {
@@ -406,8 +413,6 @@ export default function App({ playerName, renameName, joinRequest }) {
   const [joinedRoomCode, setJoinedRoomCode] = useState(null)
   const [eliminated, setEliminated] = useState(false)
   const [gameMessage, setGameMessage] = useState('')
-  const [countdown, setCountdown] = useState(0)
-  const countdownRef = useRef(null)
   const [mapReady, setMapReady] = useState(false)
   const [showStreetNames, setShowStreetNames] = useState(true)
   const [showRouteLine, setShowRouteLine] = useState(false)
@@ -524,15 +529,6 @@ export default function App({ playerName, renameName, joinRequest }) {
       setPickedSpawn({ lat: lngLat.lat, lng: lngLat.lng })
       return false
     })
-  }, [])
-
-  useEffect(() => {
-    return () => {
-      if (countdownRef.current) {
-        clearInterval(countdownRef.current)
-        countdownRef.current = null
-      }
-    }
   }, [])
 
   useEffect(() => {
@@ -764,11 +760,11 @@ export default function App({ playerName, renameName, joinRequest }) {
     // normal, 200 under Turbo. S/ArrowDown is an instant facing-flip now (see the tick loop),
     // not a held reverse gear, so there's no separate reverse speed tier anymore.
     const base = (movementKeyHeld ? currentSegment?.speedKmh ?? 50 : 0) * 2
-    // Tag's "It" drives 1.5x everyone else's speed.
+    // Tag's "It" drives 2x everyone else's speed.
     const isIt = currentRoom?.mode === 'tag' && currentRoom.itName === name
-    if (isIt) return base * 1.5
+    if (isIt) return base * 2
     // Turbo (hold Shift or the on-screen button): unlimited use, doubles speed in every mode
-    // except Tag - It's 1.5x above is the only speed buff Tag allows.
+    // except Tag - It's 2x above is the only speed buff Tag allows.
     const turboActive = (controls.turbo || turboButtonOn) && currentRoom?.mode !== 'tag'
     return turboActive ? base * 2 : base
   }, [controls, movementKeyHeld, currentSegment, currentRoom, name, turboButtonOn])
@@ -891,26 +887,6 @@ export default function App({ playerName, renameName, joinRequest }) {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [quitGame])
-
-  const startCountdown = useCallback((seconds, onFinish) => {
-    if (countdownRef.current) {
-      clearInterval(countdownRef.current)
-      countdownRef.current = null
-    }
-    setCountdown(seconds)
-    countdownRef.current = window.setInterval(() => {
-      setCountdown((s) => {
-        if (s <= 1) {
-          clearInterval(countdownRef.current)
-          countdownRef.current = null
-          setCountdown(0)
-          if (onFinish) onFinish()
-          return 0
-        }
-        return s - 1
-      })
-    }, 1000)
-  }, [])
 
   const handleControlsChange = useCallback((nextControls) => {
     setControls(nextControls)
@@ -1461,18 +1437,9 @@ export default function App({ playerName, renameName, joinRequest }) {
   )
 
 
-  const restartRoom = useCallback(() => {
-    if (!currentRoom) return
-    // do a 3s countdown then restart
-    startCountdown(3, () => {
-      restartImmediate()
-    })
-  }, [currentRoom, updateRoom])
-
-
-  // Builds the fresh per-round fields (players reset, items, It, round start timestamp) shared by
-  // both the initial Start and every subsequent restart, keyed off MODE_CONFIG so it generalizes
-  // to whichever mode the room is running instead of special-casing survival.
+  // Builds the fresh per-round fields (players reset, items, It, round start timestamp) - used by
+  // startRoom, keyed off MODE_CONFIG so it generalizes to whichever mode the room is running
+  // instead of special-casing survival.
   const buildRoundState = useCallback(
     (players, roomMode) => {
       const { players: nextPlayers, itName } = resetPlayersForRound(players, roomMode)
@@ -1490,25 +1457,6 @@ export default function App({ playerName, renameName, joinRequest }) {
     },
     [graph]
   )
-
-  const restartImmediate = useCallback(() => {
-    if (!currentRoom) return
-    const cfg = MODE_CONFIG[currentRoom.mode]
-    const enoughPlayers = currentRoom.players.length >= cfg.minPlayers
-    const roundExtras = enoughPlayers ? buildRoundState(currentRoom.players, currentRoom.mode) : null
-    const nextRoom = {
-      ...currentRoom,
-      status: enoughPlayers ? 'playing' : 'waiting',
-      players: roundExtras ? roundExtras.players : currentRoom.players.map((player) => ({ ...player, eliminated: false })),
-      itName: roundExtras ? roundExtras.itName : null,
-      items: roundExtras ? roundExtras.items : [],
-      roundStartedAt: roundExtras ? roundExtras.roundStartedAt : null,
-      winners: []
-    }
-    updateRoom(currentRoom.code, () => nextRoom)
-    setEliminated(false)
-    setStarted(nextRoom.status === 'playing')
-  }, [currentRoom, updateRoom, buildRoundState])
 
   // Survival round resolution (host-only): once the 10-minute mark passes, tally each player's
   // last-known health (self from healthRef, others from their last broadcast) and resolve the
@@ -1537,7 +1485,7 @@ export default function App({ playerName, renameName, joinRequest }) {
   }, [isRoomHost, currentRoom, name, updateRoom])
 
   // Tag round resolution (host-only): either It eliminates every other player ("It won") or the
-  // 5-minute mark passes first ("It lost", every still-alive non-It player wins).
+  // 10-minute mark passes first ("It lost", every still-alive non-It player wins).
   useEffect(() => {
     if (!isRoomHost || currentRoom?.mode !== 'tag' || currentRoom.status !== 'playing' || !currentRoom.roundStartedAt) return
     // NPCs are ambient-only (v1) and never eligible to be It (see resetPlayersForRound), so they're
@@ -1558,17 +1506,6 @@ export default function App({ playerName, renameName, joinRequest }) {
     }, 1000)
     return () => window.clearInterval(interval)
   }, [isRoomHost, currentRoom, updateRoom])
-
-  // Auto-restart host-gated rounds when finished (host only) - generalizes what used to be
-  // survival-only to every mode where the host controls when a round begins.
-  useEffect(() => {
-    if (!currentRoom || !isRoomHost) return
-    if (currentRoom.status === 'finished' && MODE_CONFIG[currentRoom.mode]?.hostGatedStart) {
-      startCountdown(3, () => {
-        restartImmediate()
-      })
-    }
-  }, [currentRoom, isRoomHost, startCountdown, restartImmediate])
 
   const startRoom = useCallback(() => {
     if (!currentRoom || !isRoomHost) return
@@ -1591,12 +1528,6 @@ export default function App({ playerName, renameName, joinRequest }) {
 
   const stopRoom = useCallback(() => {
     if (!currentRoom || !isRoomHost) return
-    // cancel pending countdowns
-    if (countdownRef.current) {
-      clearInterval(countdownRef.current)
-      countdownRef.current = null
-      setCountdown(0)
-    }
     const nextRoom = {
       ...currentRoom,
       status: MODE_CONFIG[currentRoom.mode]?.hostGatedStart ? 'finished' : 'waiting'
@@ -1993,6 +1924,18 @@ export default function App({ playerName, renameName, joinRequest }) {
     }
     return [...currentRoom.players].sort((a, b) => scoreFor(b) - scoreFor(a))
   }, [currentRoom, name, health, livePositions])
+  // Round-finish report: no restart option (host or otherwise) and no auto-restart countdown -
+  // whoever's still around just sees how it went and leaves whenever they're ready, no rush.
+  // Wanting to play again means creating/joining a fresh room, same as any other new round.
+  const roundReportPanel = currentRoom && currentRoom.status === 'finished' ? (
+    <div className="room-finished">
+      <div className="room-finished-title">{currentRoom.winners?.length ? `${currentRoom.winners.join(' & ')} won!` : 'Round finished'}</div>
+      {currentRoom.roundStartedAt ? (
+        <div className="room-finished-time">Round time: {formatDuration((currentRoom.updatedAt || Date.now()) - currentRoom.roundStartedAt)}</div>
+      ) : null}
+      <button className="leave-room" onClick={leaveRoom}>Leave room</button>
+    </div>
+  ) : null
   const roomStatusPanels = currentRoom ? (
     <>
       <div className="room-meta">
@@ -2153,15 +2096,7 @@ export default function App({ playerName, renameName, joinRequest }) {
                     <button className="leave-room" onClick={leaveRoom}>Leave</button>
                   </div>
                 ) : null}
-                {currentRoom && currentRoom.status === 'finished' ? (
-                  <div className="room-finished">
-                    <div>{currentRoom.winners?.length ? `${currentRoom.winners.join(' & ')} won` : 'Round finished'}</div>
-                    {isRoomHost ? (
-                      <button className="cloud-button" onClick={restartRoom}>Restart round</button>
-                    ) : null}
-                    <button className="leave-room" onClick={leaveRoom}>Leave room</button>
-                  </div>
-                ) : null}
+                {roundReportPanel}
                 {MODE_CONFIG[mode]?.roomBased && !joinedRoomCode ? (
                   <div className="room-list">
                     <div className="room-list-title">Available rooms</div>
@@ -2198,15 +2133,7 @@ export default function App({ playerName, renameName, joinRequest }) {
           </div>
         ) : null}
         {started ? roomStatusPanels : null}
-        {started && currentRoom?.status === 'finished' ? (
-          <div className="room-finished">
-            <div>{currentRoom.winners?.length ? `${currentRoom.winners.join(' & ')} won` : 'Round finished'}</div>
-            {isRoomHost ? (
-              <button className="cloud-button" onClick={restartRoom}>Restart round</button>
-            ) : null}
-            <button className="leave-room" onClick={leaveRoom}>Leave room</button>
-          </div>
-        ) : null}
+        {started ? roundReportPanel : null}
         {started ? (
           <div className="status-panel">
             <div className="center-toggle">
@@ -2274,9 +2201,6 @@ export default function App({ playerName, renameName, joinRequest }) {
           <button className="cloud-button" onClick={zoomOut}>−</button>
           <button className="leave-room" onClick={quitGame}>Quit</button>
         </div>
-        {countdown > 0 ? (
-          <div className="countdown-overlay">{countdown}</div>
-        ) : null}
         <ScreenOverlay wind={wind} players={screenPlayers} items={screenItems} started={started} name={name} speedKmh={displayedSpeed} turboActive={turboActive} compassRef={compassRef} gameMessage={gameMessage} />
       </div>
     </div>
