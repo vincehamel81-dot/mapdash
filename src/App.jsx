@@ -387,6 +387,27 @@ function cloudsToGeoJSON(clouds) {
   }
 }
 
+// MapLibre's source.setData() has no built-in tweening - a raw position change is an instant
+// jump-cut, which at Survival's fast tick rate reads as clouds "teleporting" rather than drifting.
+// Rather than raising tick frequency further (each tick is also a Supabase write), this smoothly
+// slides each cloud (matched by id) from its position at the START of the current tick interval to
+// its new tick position, over the interval's own duration - the authoritative tick stays exactly
+// as infrequent as before, only the client-side rendering is interpolated. New clouds (no prior
+// position to interpolate from) just appear at their spawn point; removed clouds vanish instantly.
+function interpolateClouds(fromList, toList, t) {
+  const fromById = new Map(fromList.map((c) => [c.id, c]))
+  const clamped = Math.max(0, Math.min(1, t))
+  return toList.map((cloud) => {
+    const prev = fromById.get(cloud.id)
+    if (!prev) return cloud
+    return {
+      ...cloud,
+      lat: prev.lat + (cloud.lat - prev.lat) * clamped,
+      lng: prev.lng + (cloud.lng - prev.lng) * clamped
+    }
+  })
+}
+
 function bboxOutlineGeoJSON(box) {
   const { south, west, north, east } = box
   return {
@@ -965,6 +986,13 @@ export default function App({ playerName, renameName, joinRequest }) {
   // a little, that local heading can briefly favor "backward" over "forward" while the player is
   // steadily holding the same key the whole time, causing an unintended reversal mid-block.
   const lastAbsoluteTargetRef = useRef(null)
+  // Drives the cloud-position smoothing described at interpolateClouds - `from`/`to` are the
+  // cloud lists bracketing the current tick interval, `startTime`/`durationMs` say how far through
+  // it we are. Updated whenever `clouds` state changes; read every animation frame by the render
+  // loop below, entirely separate from the (infrequent, Supabase-writing) authoritative tick.
+  const cloudsAnimRef = useRef({ from: [], to: [], startTime: 0, durationMs: CLOUD_MOVE_INTERVAL_MS })
+  const prevCloudsForAnimRef = useRef([])
+  const cloudsRenderFrameRef = useRef(null)
   // Host-only local simulation state for every ambient NPC currently in the room: name ->
   // { edgeId, distanceAlong, direction }. Never persisted or broadcast itself - only the resulting
   // lat/lng gets broadcast (see the NPC tick effect below), same as a real player's own position.
@@ -1497,12 +1525,41 @@ export default function App({ playerName, renameName, joinRequest }) {
     return () => map.off('zoomend', handleZoomEnd)
   }, [mapReady])
 
+  // Captures a new drift transition every time the authoritative `clouds` tick lands - actual
+  // rendering happens in the separate rAF loop below, which reads this ref every frame regardless
+  // of how infrequently this effect itself fires.
   useEffect(() => {
-    const map = mapRef.current
-    if (!map || !mapReady) return
-    const source = map.getSource('clouds')
-    if (source) source.setData(cloudsToGeoJSON(clouds))
-  }, [clouds, mapReady])
+    const durationMs = currentRoom?.mode === 'survival' ? SURVIVAL_CLOUD_MOVE_INTERVAL_MS : CLOUD_MOVE_INTERVAL_MS
+    cloudsAnimRef.current = { from: prevCloudsForAnimRef.current, to: clouds, startTime: Date.now(), durationMs }
+    prevCloudsForAnimRef.current = clouds
+  }, [clouds, currentRoom?.mode])
+
+  useEffect(() => {
+    if (!mapReady) return
+    let lastRenderedAnim = null
+    let settled = false
+    const renderFrame = () => {
+      const map = mapRef.current
+      const source = map?.getSource('clouds')
+      const anim = cloudsAnimRef.current
+      if (source) {
+        const t = anim.durationMs > 0 ? (Date.now() - anim.startTime) / anim.durationMs : 1
+        // Once a transition reaches t>=1, its final frame has already been rendered - skip
+        // rebuilding/reassigning an unchanged few-hundred-polygon GeoJSON every frame until the
+        // next tick actually lands (60fps of identical setData calls is pure waste).
+        if (anim !== lastRenderedAnim || t < 1) {
+          source.setData(cloudsToGeoJSON(interpolateClouds(anim.from, anim.to, t)))
+          settled = t >= 1
+          if (settled) lastRenderedAnim = anim
+        }
+      }
+      cloudsRenderFrameRef.current = requestAnimationFrame(renderFrame)
+    }
+    cloudsRenderFrameRef.current = requestAnimationFrame(renderFrame)
+    return () => {
+      if (cloudsRenderFrameRef.current) cancelAnimationFrame(cloudsRenderFrameRef.current)
+    }
+  }, [mapReady])
 
   useEffect(() => {
     const map = mapRef.current

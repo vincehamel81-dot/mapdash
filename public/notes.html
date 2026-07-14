@@ -35,6 +35,11 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.2.3 (2026-07-13)</h2>
+<ul>
+  <li>Clouds no longer teleport between ticks - positions now smoothly interpolate on every frame client-side, independent of the (still infrequent, Supabase-friendly) authoritative movement tick</li>
+</ul>
+
 <h2>Version 1.2.2 (2026-07-13)</h2>
 <ul>
   <li>Fixed a Supabase realtime rate-limit crash: NPCs and Finder items each broadcast their own position individually every 200ms - with Survival's 99-bot rooms that was up to ~500 sends/second, enough to 429 the whole project (including unrelated concurrent games). Now batched into one broadcast per tick regardless of how many NPCs/items there are.</li>
