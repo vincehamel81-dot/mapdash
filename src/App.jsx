@@ -78,12 +78,12 @@ const DEBUG_ROUND_MS = (() => {
 // logic (Survival's clouds, Finder's items) stay on the curated tight box for now.
 export const MODE_CONFIG = {
   single: { label: 'Single', roomBased: false, hostGatedStart: false, minPlayers: 1, maxPlayers: 1, roundDurationMs: null, wideBbox: true },
-  team: { label: 'Team', roomBased: true, hostGatedStart: false, minPlayers: 2, maxPlayers: 30, roundDurationMs: null, wideBbox: true },
-  survival: { label: 'Survival', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 30, roundDurationMs: DEBUG_ROUND_MS ?? 10 * 60 * 1000 },
-  'finder-easy': { label: 'Finder (Easy)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 30, roundDurationMs: null },
-  'finder-roaming': { label: 'Finder (Roaming)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 30, roundDurationMs: null },
-  'finder-hard': { label: 'Finder (Hard)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 30, roundDurationMs: null },
-  tag: { label: 'Tag', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 30, roundDurationMs: DEBUG_ROUND_MS ?? 10 * 60 * 1000 }
+  team: { label: 'Team', roomBased: true, hostGatedStart: false, minPlayers: 2, maxPlayers: 50, roundDurationMs: null, wideBbox: true },
+  survival: { label: 'Survival', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 50, roundDurationMs: DEBUG_ROUND_MS ?? 10 * 60 * 1000 },
+  'finder-easy': { label: 'Finder (Easy)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 50, roundDurationMs: null },
+  'finder-roaming': { label: 'Finder (Roaming)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 50, roundDurationMs: null },
+  'finder-hard': { label: 'Finder (Hard)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 50, roundDurationMs: null },
+  tag: { label: 'Tag', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 50, roundDurationMs: DEBUG_ROUND_MS ?? 10 * 60 * 1000 }
 }
 
 // Every Finder variant shares the same pickup mechanic/roster fields (found-item count, "first to
@@ -1567,9 +1567,11 @@ export default function App({ playerName, renameName, joinRequest }) {
   useEffect(() => {
     const spawnCloud = () => {
       const isSurvival = liveRef.current.currentRoom?.mode === 'survival'
-      // "Almost twice as big, not twice as big" - 1.75x rather than 2x for Survival. Always small -
-      // see randomSmallCloudRadius's comment for why big clouds are now "Add cloud"-only.
-      const radiusMeters = randomSmallCloudRadius(isSurvival ? 1.75 : 1)
+      // Exactly 2x for Survival per direct feedback (an earlier "almost twice, 1.75x" tuning was
+      // superseded - Survival was still too easy, and bigger clouds (not more of them) was judged
+      // the more logical fix). Always small - see randomSmallCloudRadius's comment for why big
+      // clouds are now "Add cloud"-only.
+      const radiusMeters = randomSmallCloudRadius(isSurvival ? 2 : 1)
       // Retry a few times to avoid spawning right on top of a player; unlike before, give up on
       // this spawn entirely if every attempt is still too close, rather than forcing a bad spawn -
       // a cloud landing directly on a player instantly stripped their health with no way to react.
@@ -1738,7 +1740,7 @@ export default function App({ playerName, renameName, joinRequest }) {
                 id: crypto.randomUUID(),
                 lat,
                 lng,
-                radiusMeters: randomSmallCloudRadius(1.75),
+                radiusMeters: randomSmallCloudRadius(2),
                 tier: randomCloudTier(),
                 createdAt: Date.now(),
                 lifetimeMs: randomCloudLifetimeMs()
@@ -2038,13 +2040,19 @@ export default function App({ playerName, renameName, joinRequest }) {
       if (!npcs.length) return
 
       const dt = NPC_TICK_MS / 1000
+      const isSurvival = room.mode === 'survival'
       for (const npc of npcs) {
         let sim = npcSimRef.current[npc.name]
         if (!sim) {
           const edges = Array.from(graph.edges.values())
           if (!edges.length) continue
           const edge = edges[Math.floor(Math.random() * edges.length)]
-          sim = { edgeId: edge.id, distanceAlong: Math.random() * edge.lengthMeters, direction: Math.random() < 0.5 ? 1 : -1 }
+          sim = {
+            edgeId: edge.id,
+            distanceAlong: Math.random() * edge.lengthMeters,
+            direction: Math.random() < 0.5 ? 1 : -1,
+            health: npc.health ?? 1000
+          }
         }
         const edge = graph.edges.get(sim.edgeId)
         if (!edge) {
@@ -2074,9 +2082,25 @@ export default function App({ playerName, renameName, joinRequest }) {
           }
         }
 
-        npcSimRef.current[npc.name] = { edgeId: nextEdge.id, distanceAlong: nextDistanceAlong, direction: nextDirection }
         const [lat, lng] = getSegmentPosition(nextEdge, nextDistanceAlong)
-        const payload = { name: npc.name, lat, lng }
+        // Same cloud damage/regen rules as a real player (see the mode-specific tick effect
+        // above) - NPCs used to just drive straight through clouds with no effect, which broke
+        // the "50 bots to beat" premise since they'd always sit at full health regardless.
+        let nextHealth = sim.health ?? 1000
+        if (isSurvival) {
+          const hitClouds = (liveRef.current.clouds || []).filter(
+            (c) => c.tier && haversine([lat, lng], [c.lat, c.lng]) <= c.radiusMeters
+          )
+          if (hitClouds.length) {
+            const worst = hitClouds.reduce((a, b) => (CLOUD_DAMAGE_PER_SEC[b.tier] > CLOUD_DAMAGE_PER_SEC[a.tier] ? b : a))
+            nextHealth = Math.max(0, nextHealth - CLOUD_DAMAGE_PER_SEC[worst.tier] * dt)
+          } else {
+            nextHealth = Math.min(1000, nextHealth + (1 / 3) * dt)
+          }
+        }
+
+        npcSimRef.current[npc.name] = { edgeId: nextEdge.id, distanceAlong: nextDistanceAlong, direction: nextDirection, health: nextHealth }
+        const payload = { name: npc.name, lat, lng, health: nextHealth }
         // Broadcast for every other client, and update this (the host's) own local view directly -
         // Realtime broadcast channels don't echo back to the sender by default, and NPCs have no
         // other rendering path (unlike the host's own car, which renders straight from local state).
@@ -2223,7 +2247,7 @@ export default function App({ playerName, renameName, joinRequest }) {
     // not anchored near whoever clicked - "add cloud should add a pretty big cloud too somewhere
     // in the bbox" per direct feedback, distinct from the small ambient field.
     const isSurvival = currentRoom?.mode === 'survival'
-    const radiusMeters = randomBigCloudRadius(isSurvival ? 1.75 : 1)
+    const radiusMeters = randomBigCloudRadius(isSurvival ? 2 : 1)
     let lat, lng
     for (let attempt = 0; attempt < 10; attempt++) {
       ;({ lat, lng } = randomPointInBbox())

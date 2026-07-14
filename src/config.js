@@ -55,5 +55,15 @@ export const THEMES = {
     baseNoLabels: cartoTiles('voyager_nolabels'),
     baseWithLabels: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}'],
     attribution: 'Tiles &copy; Esri &mdash; Source: Esri, HERE, Garmin, USGS, EPA, NPS, and others'
+  },
+  // Esri's free National Geographic style - warm terrain-shaded cartography, same keyless
+  // server.arcgisonline.com service as the two Esri themes above (verified the tile endpoint
+  // actually resolves before adding it, same as Esri Streets). No separate label-free variant
+  // exists for this one either, so it uses the same CARTO-nolabels substitution trick.
+  esriNatGeo: {
+    name: 'Esri NatGeo',
+    baseNoLabels: cartoTiles('voyager_nolabels'),
+    baseWithLabels: ['https://server.arcgisonline.com/ArcGIS/rest/services/NatGeo_World_Map/MapServer/tile/{z}/{y}/{x}'],
+    attribution: 'Tiles &copy; Esri &mdash; National Geographic, Esri, DeLorme, NAVTEQ, UNEP-WCMC, USGS, NASA, ESA, METI, NRCAN, GEBCO, NOAA, iPC'
   }
 }
