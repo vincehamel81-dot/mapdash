@@ -35,6 +35,13 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.2.4 (2026-07-13)</h2>
+<ul>
+  <li>Fixed a race condition where two independent cloud-update timers in Survival could clobber each other's writes, keeping the count stuck around 200-220 instead of growing toward 500 - merged into a single writer</li>
+  <li>Throttled cloud rendering to ~12fps instead of full 60fps - full-rate updates on a few-hundred-polygon layer were heavy enough to stutter unrelated map interaction</li>
+  <li>Survival wind capped at 1000 km/h (was uncapped, up to ~1400)</li>
+</ul>
+
 <h2>Version 1.2.3 (2026-07-13)</h2>
 <ul>
   <li>Clouds no longer teleport between ticks - positions now smoothly interpolate on every frame client-side, independent of the (still infrequent, Supabase-friendly) authoritative movement tick</li>

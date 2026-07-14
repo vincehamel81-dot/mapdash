@@ -47,14 +47,21 @@ const CARDINAL_ANGLES = {
 // Cap how fast the map's bearing can rotate so a heading change at a turn eases in smoothly
 // (Android Auto style) instead of snapping instantly to the new segment's direction.
 const MAX_BEARING_DEG_PER_SEC = 220
+
+// Survival's wind is 10x the base value, capped at a max - uncapped it could hit ~1400 km/h at
+// the top of the base 40-140 range, which direct feedback called "epic" rather than useful. Used
+// for both the actual drift-distance math and the matching on-screen label, so what's displayed
+// always matches what's actually happening.
+const SURVIVAL_WIND_MAX_KMH = 1000
+function survivalWindSpeedKmh(baseSpeed) {
+  return Math.min(baseSpeed * 10, SURVIVAL_WIND_MAX_KMH)
+}
 const CLOUD_MOVE_INTERVAL_MS = 7000
 // Survival's movement tick runs 3x as often per direct feedback ("refresh rate x3") - clouds felt
-// nearly stationary otherwise.
+// nearly stationary otherwise. Also doubles as the guaranteed-growth cadence: Survival's tick adds
+// one extra cloud every call (see topUp's `guaranteed` param) - over a 10-minute round at ~2.3s
+// per tick that's roughly +250-260 on top of the 200 seeded at start.
 const SURVIVAL_CLOUD_MOVE_INTERVAL_MS = Math.round(CLOUD_MOVE_INTERVAL_MS / 3)
-// Every 2s, Survival forcibly adds one more cloud regardless of the min/max maintenance logic
-// below - over a 10-minute round that's +300 clouds on top of the 200 seeded at start, growing to
-// ~500 by the end. See SURVIVAL_CLOUD_SPAWN_INTERVAL_MS's effect further down.
-const SURVIVAL_CLOUD_SPAWN_INTERVAL_MS = 2000
 // Raised from the original 5/8 floor/ceiling - clouds now spread across the whole bbox instead of
 // clustering near one player, so a higher count is needed to keep the field feeling populated.
 const CLOUD_MIN_COUNT = 10
@@ -1537,20 +1544,30 @@ export default function App({ playerName, renameName, joinRequest }) {
   useEffect(() => {
     if (!mapReady) return
     let lastRenderedAnim = null
-    let settled = false
+    let settledAnim = null
+    let lastRenderTime = 0
     const renderFrame = () => {
       const map = mapRef.current
       const source = map?.getSource('clouds')
       const anim = cloudsAnimRef.current
       if (source) {
-        const t = anim.durationMs > 0 ? (Date.now() - anim.startTime) / anim.durationMs : 1
-        // Once a transition reaches t>=1, its final frame has already been rendered - skip
-        // rebuilding/reassigning an unchanged few-hundred-polygon GeoJSON every frame until the
-        // next tick actually lands (60fps of identical setData calls is pure waste).
-        if (anim !== lastRenderedAnim || t < 1) {
+        const now = Date.now()
+        const t = anim.durationMs > 0 ? (now - anim.startTime) / anim.durationMs : 1
+        const isNewTransition = anim !== lastRenderedAnim
+        const settling = t >= 1
+        const alreadySettled = settling && settledAnim === anim
+        // Throttled to ~12fps instead of the raw 60fps rAF cadence - full-rate setData() on a
+        // few-hundred-polygon GeoJSON turned out to be heavy enough to visibly stutter unrelated
+        // map interaction (reported: mousewheel zoom). Still far smoother than the pre-interpolation
+        // jump-cut, just not literally every frame. Always renders immediately on a brand new
+        // transition (so motion starts right away) and exactly once on settling (so the final
+        // position is exact, not whatever the throttle happened to land on) - then skips every
+        // subsequent frame for that same transition once settled, same as before.
+        if (!alreadySettled && (isNewTransition || settling || now - lastRenderTime >= 80)) {
           source.setData(cloudsToGeoJSON(interpolateClouds(anim.from, anim.to, t)))
-          settled = t >= 1
-          if (settled) lastRenderedAnim = anim
+          lastRenderTime = now
+          lastRenderedAnim = anim
+          if (settling) settledAnim = anim
         }
       }
       cloudsRenderFrameRef.current = requestAnimationFrame(renderFrame)
@@ -1698,7 +1715,7 @@ export default function App({ playerName, renameName, joinRequest }) {
 
     const driftAndPrune = (list) => {
       const survivalNow = liveRef.current.currentRoom?.mode === 'survival'
-      const windSpeed = wind.speed * (survivalNow ? 10 : 1)
+      const windSpeed = survivalNow ? survivalWindSpeedKmh(wind.speed) : wind.speed
       const distanceMeters = (windSpeed / 3.6) * (moveIntervalMs / 1000)
       const driftBearing = wind.angle ?? 0
       const now = Date.now()
@@ -1721,15 +1738,20 @@ export default function App({ playerName, renameName, joinRequest }) {
 
     // Tops up with a while loop (not a single conditional push) so a big shortfall - many clouds
     // expiring around the same time, or Survival's much higher floor - closes quickly instead of
-    // trickling in at ~1 per tick.
-    const topUp = (list, minCount, maxCount) => {
+    // trickling in at ~1 per tick. `guaranteed` forces one extra spawn every call (Survival) rather
+    // than the normal 40%-chance single add - this used to be a second independent setInterval,
+    // but that raced against this same tick's own updateRoom call (both read roomsRef.current,
+    // which is only synced on React's next render, not synchronously - whichever call's setRooms
+    // landed second silently clobbered the other's clouds). Folding it into this one tick removes
+    // the race by construction: there's only ever one writer now.
+    const topUp = (list, minCount, maxCount, guaranteed) => {
       const next = list
       while (next.length < minCount) {
         const spawned = spawnCloud()
         if (!spawned) break
         next.push(spawned)
       }
-      if (Math.random() < 0.4) {
+      if (guaranteed || Math.random() < 0.4) {
         const spawned = spawnCloud()
         if (spawned) next.push(spawned)
       }
@@ -1744,13 +1766,13 @@ export default function App({ playerName, renameName, joinRequest }) {
       // Host computes authoritative cloud state and writes it to the room
       if (isRoomHost && currentRoom) {
         const base = Array.isArray(currentRoom.clouds) && currentRoom.clouds.length ? currentRoom.clouds : clouds
-        const next = topUp(driftAndPrune(base), minCount, maxCount)
+        const next = topUp(driftAndPrune(base), minCount, maxCount, isSurvival)
         updateRoom(currentRoom.code, (room) => ({ ...room, clouds: next }))
         setClouds(next)
       } else {
         // Non-host clients will receive cloud updates from the room; fallback to local behavior if none exists
         if (!currentRoom?.clouds || !currentRoom.clouds.length) {
-          setClouds((prev) => topUp(driftAndPrune(prev), minCount, maxCount))
+          setClouds((prev) => topUp(driftAndPrune(prev), minCount, maxCount, isSurvival))
         }
       }
     }
@@ -1762,29 +1784,6 @@ export default function App({ playerName, renameName, joinRequest }) {
     // when a room transitions into/out of Survival, same looseness the rest of this effect already
     // had toward currentRoom/isRoomHost/clouds/updateRoom (all read via closure, not listed here).
   }, [wind, currentRoom?.mode])
-
-  // Survival-only guaranteed cloud growth: a fixed one-more-cloud-every-2s add, independent of the
-  // movement tick's own min/max maintenance above - that logic tops up toward a floor and trims at
-  // a ceiling, which caps how dense the field gets. This is a deliberately unbounded (up to the
-  // safety ceiling) growth curve instead, so the round gets harder as it goes rather than settling
-  // at a fixed density early on.
-  useEffect(() => {
-    if (!isRoomHost || currentRoom?.mode !== 'survival') return
-    const interval = window.setInterval(() => {
-      const room = liveRef.current.currentRoom
-      if (!room || room.mode !== 'survival' || room.status !== 'playing') return
-      const spawned = spawnCloud()
-      if (!spawned) return
-      updateRoom(room.code, (r) => ({ ...r, clouds: [...(r.clouds || []), spawned].slice(-CLOUD_MAX_COUNT_SURVIVAL) }))
-    }, SURVIVAL_CLOUD_SPAWN_INTERVAL_MS)
-    return () => window.clearInterval(interval)
-    // updateRoom deliberately omitted - it's declared later in the component (const updateRoom =
-    // useCallback(...) further down) so listing it here would evaluate a reference to it before
-    // its own declaration line runs on first render, throwing "Cannot access before
-    // initialization". It's referenced via closure only, same as the sibling cloud-movement effect
-    // above, which never lists it either for the same reason.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isRoomHost, currentRoom?.mode, spawnCloud])
 
   useEffect(() => {
     // Initialize default clouds for solo usage; room-host will overwrite when appropriate
@@ -2648,11 +2647,11 @@ export default function App({ playerName, renameName, joinRequest }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentRoom?.roundStartedAt, currentRoom?.status, currentRoom?.mode, clockTick])
 
-  // Survival's wind is 10x what's actually stored in `wind` state (see the cloud-drift effect) -
-  // this is purely the matching display value so the on-screen label doesn't undersell how fast
-  // clouds are actually moving.
+  // Survival's wind is 10x (capped) what's actually stored in `wind` state (see the cloud-drift
+  // effect and survivalWindSpeedKmh) - this is purely the matching display value so the on-screen
+  // label doesn't undersell how fast clouds are actually moving.
   const displayWind = useMemo(
-    () => (currentRoom?.mode === 'survival' ? { ...wind, speed: wind.speed * 10 } : wind),
+    () => (currentRoom?.mode === 'survival' ? { ...wind, speed: survivalWindSpeedKmh(wind.speed) } : wind),
     [wind, currentRoom?.mode]
   )
 
