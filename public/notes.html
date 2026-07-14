@@ -35,6 +35,11 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.2.5 (2026-07-14)</h2>
+<ul>
+  <li>Fixed the real cause of clouds freezing/stuttering: the movement tick was reading a stale, only-every-20-seconds-refreshed snapshot of room data instead of the current one, so most ticks drifted from the same frozen starting point instead of compounding - clouds should now move continuously every tick with no freeze window</li>
+</ul>
+
 <h2>Version 1.2.4 (2026-07-13)</h2>
 <ul>
   <li>Fixed a race condition where two independent cloud-update timers in Survival could clobber each other's writes, keeping the count stuck around 200-220 instead of growing toward 500 - merged into a single writer</li>

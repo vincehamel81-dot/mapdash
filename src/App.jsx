@@ -1760,18 +1760,30 @@ export default function App({ playerName, renameName, joinRequest }) {
     }
 
     const moveClouds = () => {
-      const isSurvival = liveRef.current.currentRoom?.mode === 'survival'
+      // Everything here reads liveRef.current instead of the closed-over currentRoom/isRoomHost -
+      // this effect only restarts (recapturing fresh closures) every ~20s when wind changes, but
+      // moveClouds fires every ~2.3s via its own setInterval. Reading the STALE closed-over
+      // currentRoom.clouds as `base` meant every tick drifted from the SAME frozen starting
+      // position instead of the previous tick's result - each write briefly overwrote the last
+      // with an equally-small drift from that same stale base, so clouds barely moved for ~20s at
+      // a stretch, then visibly jumped once the effect finally refreshed. liveRef.current is kept
+      // synchronously current every render (see the liveRef assignment), so this is the same fix
+      // already applied to isSurvival just below - just extended to the rest of this function.
+      const live = liveRef.current
+      const room = live.currentRoom
+      const isSurvival = room?.mode === 'survival'
+      const isHost = room?.host === live.name
       const minCount = isSurvival ? CLOUD_MIN_COUNT_SURVIVAL : CLOUD_MIN_COUNT
       const maxCount = isSurvival ? CLOUD_MAX_COUNT_SURVIVAL : CLOUD_MAX_COUNT
       // Host computes authoritative cloud state and writes it to the room
-      if (isRoomHost && currentRoom) {
-        const base = Array.isArray(currentRoom.clouds) && currentRoom.clouds.length ? currentRoom.clouds : clouds
+      if (isHost && room) {
+        const base = Array.isArray(room.clouds) && room.clouds.length ? room.clouds : live.clouds
         const next = topUp(driftAndPrune(base), minCount, maxCount, isSurvival)
-        updateRoom(currentRoom.code, (room) => ({ ...room, clouds: next }))
+        live.updateRoom(room.code, (r) => ({ ...r, clouds: next }))
         setClouds(next)
       } else {
         // Non-host clients will receive cloud updates from the room; fallback to local behavior if none exists
-        if (!currentRoom?.clouds || !currentRoom.clouds.length) {
+        if (!room?.clouds || !room.clouds.length) {
           setClouds((prev) => topUp(driftAndPrune(prev), minCount, maxCount, isSurvival))
         }
       }
