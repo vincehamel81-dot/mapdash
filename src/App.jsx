@@ -43,6 +43,28 @@ const CARDINAL_ANGLES = {
   W: 270,
   NW: 315
 }
+const WIND_DIRECTIONS = Object.keys(CARDINAL_ANGLES)
+const OPPOSITE_DIRECTION = { N: 'S', NE: 'SW', E: 'W', SE: 'NW', S: 'N', SW: 'NE', W: 'E', NW: 'SE' }
+
+// Never repeats the previous direction (direct feedback: 5x West in a row pushed most clouds
+// permanently outside the bbox, since Survival's fast wind + no bbox-exit pruning means an
+// off-screen cloud just sits there wasted for the rest of the round). If a majority of clouds have
+// already drifted outside the core play area, biases toward blowing them back in (roughly opposite
+// the direction that pushed them out) instead of picking fully at random.
+function pickWindDirection(prevDirection, clouds) {
+  let pool = prevDirection ? WIND_DIRECTIONS.filter((d) => d !== prevDirection) : WIND_DIRECTIONS
+  if (prevDirection && clouds?.length) {
+    const outsideCount = clouds.filter(
+      (c) => c.lat < CONFIG.bbox.south || c.lat > CONFIG.bbox.north || c.lng < CONFIG.bbox.west || c.lng > CONFIG.bbox.east
+    ).length
+    if (outsideCount / clouds.length >= 0.5) {
+      const opposite = OPPOSITE_DIRECTION[prevDirection]
+      const idx = WIND_DIRECTIONS.indexOf(opposite)
+      pool = [WIND_DIRECTIONS[(idx + 7) % 8], opposite, WIND_DIRECTIONS[(idx + 1) % 8]]
+    }
+  }
+  return pool[Math.floor(Math.random() * pool.length)]
+}
 
 // Cap how fast the map's bearing can rotate so a heading change at a turn eases in smoothly
 // (Android Auto style) instead of snapping instantly to the new segment's direction.
@@ -873,6 +895,7 @@ export default function App({ playerName, renameName, joinRequest }) {
       livePositions,
       liveItemPositions,
       clouds,
+      wind,
       eliminated,
       foundItems: currentPlayer?.foundItems || [],
       updateRoom,
@@ -1648,8 +1671,9 @@ export default function App({ playerName, renameName, joinRequest }) {
 
   useEffect(() => {
     const updateWind = () => {
-      const directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
-      const direction = directions[Math.floor(Math.random() * directions.length)]
+      // liveRef.current read fresh each call (not a dependency) so this 20s interval never needs
+      // to restart - same freshness pattern as the cloud-movement tick's own liveRef reads.
+      const direction = pickWindDirection(liveRef.current.wind?.direction, liveRef.current.clouds)
       // Bumped up from 20-80 - faster-moving clouds per direct feedback ("make sure to... make
       // players move").
       const speed = Math.floor(40 + Math.random() * 100)

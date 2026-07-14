@@ -35,6 +35,12 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.2.6 (2026-07-14)</h2>
+<ul>
+  <li>Wind direction never repeats twice in a row - fixes long streaks (e.g. 5x West) pushing most clouds permanently outside the play area</li>
+  <li>If a majority of clouds have already drifted outside the bbox, the next wind pick is biased back toward blowing them in instead of picking fully at random</li>
+</ul>
+
 <h2>Version 1.2.5 (2026-07-14)</h2>
 <ul>
   <li>Fixed the real cause of clouds freezing/stuttering: the movement tick was reading a stale, only-every-20-seconds-refreshed snapshot of room data instead of the current one, so most ticks drifted from the same frozen starting point instead of compounding - clouds should now move continuously every tick with no freeze window</li>
