@@ -862,16 +862,38 @@ export default function App({ playerName, renameName, joinRequest }) {
       return
     }
     const channel = supabase.channel(`room:${joinedRoomCode}`)
+    // A real player's own position - one broadcast per player, never batched (nothing to batch,
+    // there's only ever one).
     channel.on('broadcast', { event: 'position' }, ({ payload }) => {
       if (!payload || payload.name === name) return
       setLivePositions((prev) => ({ ...prev, [payload.name]: payload }))
     })
-    // Roaming Finder items broadcast on a separate event (not keyed by player name) - see the item
-    // tick effect below. Every client (not just the host simulating them) needs these to render the
-    // items' actual current position and to check pickups against where they really are.
-    channel.on('broadcast', { event: 'item-position' }, ({ payload }) => {
-      if (!payload?.itemId) return
-      setLiveItemPositions((prev) => ({ ...prev, [payload.itemId]: payload }))
+    // NPCs: one batched broadcast per tick (see the ambient NPC tick effect) instead of one per
+    // NPC - Survival's 99-bot rooms made one-message-per-NPC blow through Supabase's realtime
+    // rate limit (up to ~500 sends/second), which also degraded unrelated concurrent rooms since
+    // the limit is project-wide, not per-room.
+    channel.on('broadcast', { event: 'positions-batch' }, ({ payload }) => {
+      if (!Array.isArray(payload)) return
+      setLivePositions((prev) => {
+        const next = { ...prev }
+        for (const p of payload) {
+          if (p?.name && p.name !== name) next[p.name] = p
+        }
+        return next
+      })
+    })
+    // Roaming Finder items: same batching fix, one message per tick for all items instead of one
+    // per item. Every client (not just the host simulating them) needs these to render the items'
+    // actual current position and to check pickups against where they really are.
+    channel.on('broadcast', { event: 'item-positions-batch' }, ({ payload }) => {
+      if (!Array.isArray(payload)) return
+      setLiveItemPositions((prev) => {
+        const next = { ...prev }
+        for (const p of payload) {
+          if (p?.itemId) next[p.itemId] = p
+        }
+        return next
+      })
     })
     channel.subscribe()
     roomChannelRef.current = channel
@@ -1628,11 +1650,16 @@ export default function App({ playerName, renameName, joinRequest }) {
           const [lat, lng] = offsetLatLng([cloud.lat, cloud.lng], driftBearing, distanceMeters)
           return { ...cloud, lat, lng }
         })
-        .filter(
-          (cloud) =>
-            isWithinPaddedBbox(cloud.lat, cloud.lng) &&
-            now - (cloud.createdAt ?? 0) < (cloud.lifetimeMs ?? randomCloudLifetimeMs())
-        )
+        .filter((cloud) => {
+          // Survival's 10x wind covers CLOUD_BBOX_MARGIN_DEG's ~3.3km margin in as little as
+          // 9-30 seconds (259-907m per tick) - pruning on bbox-exit there meant clouds were dying
+          // almost as fast as they spawned, capping the population far below the intended ~500
+          // instead of actually accumulating over the round. Survival relies on the lifetime timer
+          // (7-15min) and the CLOUD_MAX_COUNT_SURVIVAL safety cap alone; every other mode keeps
+          // the bbox-exit prune since their normal-speed wind doesn't have this problem.
+          if (!(survivalNow || isWithinPaddedBbox(cloud.lat, cloud.lng))) return false
+          return now - (cloud.createdAt ?? 0) < (cloud.lifetimeMs ?? randomCloudLifetimeMs())
+        })
     }
 
     // Tops up with a while loop (not a single conditional push) so a big shortfall - many clouds
@@ -2141,6 +2168,12 @@ export default function App({ playerName, renameName, joinRequest }) {
 
       const dt = NPC_TICK_MS / 1000
       const isSurvival = room.mode === 'survival'
+      // Batched into ONE broadcast per tick instead of one per NPC - with Survival's 99-bot rooms,
+      // one message per NPC at a 200ms tick meant up to ~500 broadcast sends/second, which blew
+      // through Supabase's realtime rate limit (429s) and, since that limit is project-wide rather
+      // than per-room, was degrading every other concurrent game too (reported: Finder sessions
+      // hitting the same 429s from an entirely different room).
+      const batch = []
       for (const npc of npcs) {
         let sim = npcSimRef.current[npc.name]
         if (!sim) {
@@ -2200,13 +2233,19 @@ export default function App({ playerName, renameName, joinRequest }) {
         }
 
         npcSimRef.current[npc.name] = { edgeId: nextEdge.id, distanceAlong: nextDistanceAlong, direction: nextDirection, health: nextHealth }
-        const payload = { name: npc.name, lat, lng, health: nextHealth }
-        // Broadcast for every other client, and update this (the host's) own local view directly -
-        // Realtime broadcast channels don't echo back to the sender by default, and NPCs have no
-        // other rendering path (unlike the host's own car, which renders straight from local state).
-        roomChannelRef.current?.send({ type: 'broadcast', event: 'position', payload })
-        setLivePositions((prev) => ({ ...prev, [npc.name]: payload }))
+        batch.push({ name: npc.name, lat, lng, health: nextHealth })
       }
+      if (!batch.length) return
+      // One broadcast for every other client, and update this (the host's) own local view
+      // directly - Realtime broadcast channels don't echo back to the sender by default, and NPCs
+      // have no other rendering path (unlike the host's own car, which renders straight from
+      // local state).
+      roomChannelRef.current?.send({ type: 'broadcast', event: 'positions-batch', payload: batch })
+      setLivePositions((prev) => {
+        const next = { ...prev }
+        for (const p of batch) next[p.name] = p
+        return next
+      })
     }, NPC_TICK_MS)
     return () => window.clearInterval(interval)
   }, [isRoomHost, joinedRoomCode, graph])
@@ -2228,6 +2267,10 @@ export default function App({ playerName, renameName, joinRequest }) {
       if (!items.length) return
 
       const dt = ITEM_TICK_MS / 1000
+      // Batched into ONE broadcast per tick instead of one per item, same fix as the NPC tick
+      // effect above (up to 10 items every 200ms was still 50 sends/second, contributing to the
+      // same Supabase realtime rate-limit problem).
+      const batch = []
       for (const item of items) {
         const behavior = ITEM_BEHAVIORS[item.iconId] || { type: 'ambient' }
         let sim = itemSimRef.current[item.id]
@@ -2259,9 +2302,7 @@ export default function App({ playerName, renameName, joinRequest }) {
           const edge = graph.edges.get(sim.edgeId)
           if (edge) {
             const [lat, lng] = getSegmentPosition(edge, sim.distanceAlong)
-            const payload = { itemId: item.id, lat, lng }
-            roomChannelRef.current?.send({ type: 'broadcast', event: 'item-position', payload })
-            setLiveItemPositions((prev) => ({ ...prev, [item.id]: payload }))
+            batch.push({ itemId: item.id, lat, lng })
           }
           continue
         }
@@ -2321,10 +2362,15 @@ export default function App({ playerName, renameName, joinRequest }) {
           speedChangeAt
         }
         const [lat, lng] = getSegmentPosition(nextEdge, nextDistanceAlong)
-        const payload = { itemId: item.id, lat, lng }
-        roomChannelRef.current?.send({ type: 'broadcast', event: 'item-position', payload })
-        setLiveItemPositions((prev) => ({ ...prev, [item.id]: payload }))
+        batch.push({ itemId: item.id, lat, lng })
       }
+      if (!batch.length) return
+      roomChannelRef.current?.send({ type: 'broadcast', event: 'item-positions-batch', payload: batch })
+      setLiveItemPositions((prev) => {
+        const next = { ...prev }
+        for (const p of batch) next[p.itemId] = p
+        return next
+      })
     }, ITEM_TICK_MS)
     return () => window.clearInterval(interval)
   }, [isRoomHost, joinedRoomCode, graph])
@@ -2580,13 +2626,18 @@ export default function App({ playerName, renameName, joinRequest }) {
     const ranked = sortedRosterPlayers.map((player, i) => ({ player, rank: i + 1 }))
     const top5 = ranked.slice(0, 5)
     const selfEntry = ranked.find((r) => r.player.name === name)
+    const scoreFor = (p) => (p.name === name ? health : livePositions[p.name]?.health ?? p.health ?? 1000)
+    const perfectCount = ranked.filter((r) => scoreFor(r.player) >= 1000).length
     return {
       top5,
       selfEntry: selfEntry && selfEntry.rank > 5 ? selfEntry : null,
       survivors: ranked.filter((r) => !r.player.eliminated).length,
-      total: ranked.length
+      total: ranked.length,
+      // Only worth showing once there's more perfect scores than top5 already displays - otherwise
+      // it'd just be restating what's already visible.
+      perfectCount: perfectCount > 5 ? perfectCount : null
     }
-  }, [currentRoom, sortedRosterPlayers, name])
+  }, [currentRoom, sortedRosterPlayers, name, health, livePositions])
   const renderPlayerRow = (player, rank) => {
     const isSelf = player.name === name
     const live = livePositions[player.name]
@@ -2671,11 +2722,16 @@ export default function App({ playerName, renameName, joinRequest }) {
         </div>
         {currentRoom.mode === 'survival' && survivalRosterView ? (
           <>
-            <div className="survivor-count">{survivalRosterView.survivors}/{survivalRosterView.total} survivors</div>
+            <div className="survivor-count">
+              {survivalRosterView.survivors}/{survivalRosterView.total} survivors · {clouds.length} clouds active
+            </div>
             {survivalRosterView.top5.map(({ player, rank }) => renderPlayerRow(player, rank))}
+            {survivalRosterView.perfectCount ? (
+              <div className="perfect-score-divider">Perfect scores ({survivalRosterView.perfectCount})</div>
+            ) : null}
             {survivalRosterView.selfEntry ? (
               <>
-                <div className="roster-gap-divider" />
+                {survivalRosterView.perfectCount ? null : <div className="roster-gap-divider" />}
                 {renderPlayerRow(survivalRosterView.selfEntry.player, survivalRosterView.selfEntry.rank)}
               </>
             ) : null}

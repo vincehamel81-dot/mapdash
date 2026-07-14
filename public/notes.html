@@ -35,6 +35,14 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.2.2 (2026-07-13)</h2>
+<ul>
+  <li>Fixed a Supabase realtime rate-limit crash: NPCs and Finder items each broadcast their own position individually every 200ms - with Survival's 99-bot rooms that was up to ~500 sends/second, enough to 429 the whole project (including unrelated concurrent games). Now batched into one broadcast per tick regardless of how many NPCs/items there are.</li>
+  <li>Fixed Survival clouds barely accumulating: the 10x wind covers the out-of-bounds prune margin in as little as 9-30 seconds, so clouds were dying almost as fast as they spawned. Survival now relies on cloud lifetime (7-15min) instead of bbox-exit pruning.</li>
+  <li>Added a live cloud count next to the survivor count in Survival</li>
+  <li>Survival leaderboard now shows a "Perfect scores" divider when more players are untouched (1000 HP) than fit in the top 5</li>
+</ul>
+
 <h2>Version 1.2.1 (2026-07-13)</h2>
 <ul>
   <li>Fixed a site-breaking crash ("Cannot access before initialization") introduced in v1.2 - a new effect referenced updateRoom before its declaration in the file</li>
