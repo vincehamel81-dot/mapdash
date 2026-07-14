@@ -1694,7 +1694,13 @@ export default function App({ playerName, renameName, joinRequest }) {
       updateRoom(room.code, (r) => ({ ...r, clouds: [...(r.clouds || []), spawned].slice(-CLOUD_MAX_COUNT_SURVIVAL) }))
     }, SURVIVAL_CLOUD_SPAWN_INTERVAL_MS)
     return () => window.clearInterval(interval)
-  }, [isRoomHost, currentRoom?.mode, spawnCloud, updateRoom])
+    // updateRoom deliberately omitted - it's declared later in the component (const updateRoom =
+    // useCallback(...) further down) so listing it here would evaluate a reference to it before
+    // its own declaration line runs on first render, throwing "Cannot access before
+    // initialization". It's referenced via closure only, same as the sibling cloud-movement effect
+    // above, which never lists it either for the same reason.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRoomHost, currentRoom?.mode, spawnCloud])
 
   useEffect(() => {
     // Initialize default clouds for solo usage; room-host will overwrite when appropriate
