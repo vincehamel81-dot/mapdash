@@ -207,7 +207,7 @@ function randomCloudTier() {
 // creation and every restart so a re-run round always starts from a clean slate.
 function resetPlayersForRound(players, mode) {
   let itName = null
-  const next = players.map((p) => ({ ...p, eliminated: false }))
+  const next = players.map((p) => ({ ...p, eliminated: false, eliminatedAt: null }))
   if (mode === 'survival') {
     return { players: next.map((p) => ({ ...p, health: 1000 })), itName }
   }
@@ -222,6 +222,38 @@ function resetPlayersForRound(players, mode) {
     return { players: next.map((p) => ({ ...p, isIt: p.name === itName })), itName }
   }
   return { players: next, itName }
+}
+
+// Survival scoring: ranked against the FULL field (NPCs included - they're what you're actually
+// competing against for placement, even though only real players receive points), competition-
+// ranked (ties share the better rank, next position skips accordingly - matches "if 2 players
+// have the same score, nobody gets +98, both get +100"), then mapped onto a -100..+100 scale where
+// 1st is always +100 and last is always -100 regardless of field size (score = 100 - (rank-1) *
+// 200/(total-1), which is exactly ~2 points per rank for a 100-player field per direct feedback,
+// while staying exact at both ends for any field size). Still-alive players always outrank
+// eliminated ones; among eliminated players, the most recently cut ranks best - same ordering the
+// live roster already uses (see sortedRosterPlayers).
+function computeSurvivalScores(players, healthFor) {
+  const ranked = [...players].sort((a, b) => {
+    if (Boolean(a.eliminated) !== Boolean(b.eliminated)) return a.eliminated ? 1 : -1
+    if (a.eliminated && b.eliminated) return (b.eliminatedAt ?? 0) - (a.eliminatedAt ?? 0)
+    return healthFor(b) - healthFor(a)
+  })
+  const scores = new Map()
+  let rank = 1
+  for (let i = 0; i < ranked.length; i++) {
+    const p = ranked[i]
+    if (i > 0) {
+      const prev = ranked[i - 1]
+      const tied = Boolean(prev.eliminated) === Boolean(p.eliminated) && (
+        prev.eliminated ? prev.eliminatedAt === p.eliminatedAt : healthFor(prev) === healthFor(p)
+      )
+      if (!tied) rank = i + 1
+    }
+    const score = ranked.length > 1 ? Math.round(100 - (rank - 1) * (200 / (ranked.length - 1))) : 100
+    scores.set(p.name, { rank, score })
+  }
+  return scores
 }
 
 // Resolves a roaming item's home-anchor personality (Flora/Jasper) to a real coordinate, once per
@@ -473,6 +505,30 @@ function randomPointInBbox() {
   }
 }
 
+// Survival-only: uniform spawning meant players camping near the edges saw far fewer clouds than
+// the center just by virtue of the center being "surrounded" - per direct feedback, most survivors
+// ended up next to the borders because of it. 90% of spawns land in a band along one of the 4
+// edges (the full length of that edge, not just corners); the remaining 10% stay fully random so
+// the center isn't literally clear.
+function randomEdgeBiasedPointInBbox() {
+  if (Math.random() < 0.9) {
+    const latSpan = CONFIG.bbox.north - CONFIG.bbox.south
+    const lngSpan = CONFIG.bbox.east - CONFIG.bbox.west
+    const bandFrac = 0.15
+    switch (Math.floor(Math.random() * 4)) {
+      case 0: // south edge
+        return { lat: CONFIG.bbox.south + Math.random() * latSpan * bandFrac, lng: CONFIG.bbox.west + Math.random() * lngSpan }
+      case 1: // north edge
+        return { lat: CONFIG.bbox.north - Math.random() * latSpan * bandFrac, lng: CONFIG.bbox.west + Math.random() * lngSpan }
+      case 2: // west edge
+        return { lat: CONFIG.bbox.south + Math.random() * latSpan, lng: CONFIG.bbox.west + Math.random() * lngSpan * bandFrac }
+      default: // east edge
+        return { lat: CONFIG.bbox.south + Math.random() * latSpan, lng: CONFIG.bbox.east - Math.random() * lngSpan * bandFrac }
+    }
+  }
+  return randomPointInBbox()
+}
+
 function isWithinPaddedBbox(lat, lng) {
   return (
     lat >= CONFIG.bbox.south - CLOUD_BBOX_MARGIN_DEG &&
@@ -606,7 +662,7 @@ function ScreenOverlay({ wind, players = [], items = [], radarTargets = [], star
       ) : null}
       {players.map((p) => (
         <div key={p.name} className="player-dot" style={{ left: `${p.screenX}%`, top: `${p.screenY}%`, color: p.color }}>
-          <div className="car-marker-label">{p.name}</div>
+          <div className="car-marker-label">{p.name}{p.health != null ? ` - ${p.health}` : ''}</div>
           <div className="player-dot-icon" dangerouslySetInnerHTML={{ __html: getAvatarSvg(p.avatarId) }} />
           {p.nextTurn === 'left' || p.nextTurn === 'right' ? (
             <div className={`car-marker-signal car-marker-signal-${p.nextTurn}`}>{p.nextTurn === 'left' ? '◀' : '▶'}</div>
@@ -852,6 +908,15 @@ export default function App({ playerName, renameName, joinRequest }) {
   )
 
   const isRoomHost = useMemo(() => currentRoom?.host === name, [currentRoom, name])
+
+  // Being eliminated (Tag's contact-elimination or Survival's deadline cuts) drops you back to the
+  // setup screen, still joined to the same (still-active) room - the Room code input previously
+  // kept showing that room's own code, so clicking "Create room" collided with it ("already
+  // exists"). Clearing it here covers Survival too, which never calls setEliminated(true) locally -
+  // it's detected purely from the room's own player list, same as this reads it.
+  useEffect(() => {
+    if (currentPlayer?.eliminated) setRoomCode('')
+  }, [currentPlayer?.eliminated])
 
   const roomChannelRef = useRef(null)
   const lastBroadcastRef = useRef(0)
@@ -1473,7 +1538,7 @@ export default function App({ playerName, renameName, joinRequest }) {
                 players: r.players.map((p) => (p.name === live.name ? { ...p, foundItems: nextFoundItems } : p)),
                 // First to 10 wins - guard against clobbering an already-recorded winner in the
                 // rare case two players finish within the same round-trip.
-                ...(wonRound && !r.winners?.length ? { status: 'finished', winners: [live.name] } : {})
+                ...(wonRound && !r.winners?.length ? { status: 'finished', updatedAt: Date.now(), winners: [live.name] } : {})
               }))
             }
           } else if (room.mode === 'tag' && !live.eliminated && room.itName !== live.name) {
@@ -1711,7 +1776,7 @@ export default function App({ playerName, renameName, joinRequest }) {
     // this spawn entirely if every attempt is still too close, rather than forcing a bad spawn -
     // a cloud landing directly on a player instantly stripped their health with no way to react.
     for (let attempt = 0; attempt < 10; attempt++) {
-      const { lat, lng } = randomPointInBbox()
+      const { lat, lng } = isSurvival ? randomEdgeBiasedPointInBbox() : randomPointInBbox()
       if (!isTooCloseToAnyPlayer(lat, lng, radiusMeters)) {
         return {
           id: crypto.randomUUID(),
@@ -1795,6 +1860,11 @@ export default function App({ playerName, renameName, joinRequest }) {
       // already applied to isSurvival just below - just extended to the rest of this function.
       const live = liveRef.current
       const room = live.currentRoom
+      // Same bug as the NPC tick: this had no status check at all, so clouds kept spawning,
+      // drifting, and writing to the room indefinitely after a round finished. Only gated on
+      // 'finished' specifically (not 'waiting') so decorative pre-round ambiance is unaffected,
+      // and solo/no-room play (room is null here) is unaffected too.
+      if (room?.status === 'finished') return
       const isSurvival = room?.mode === 'survival'
       const isHost = room?.host === live.name
       const minCount = isSurvival ? CLOUD_MIN_COUNT_SURVIVAL : CLOUD_MIN_COUNT
@@ -1906,7 +1976,7 @@ export default function App({ playerName, renameName, joinRequest }) {
       const clouds =
         roomMode === 'survival'
           ? Array.from({ length: CLOUD_MIN_COUNT_SURVIVAL }, () => {
-              const { lat, lng } = randomPointInBbox()
+              const { lat, lng } = randomEdgeBiasedPointInBbox()
               return {
                 id: crypto.randomUUID(),
                 lat,
@@ -1940,11 +2010,22 @@ export default function App({ playerName, renameName, joinRequest }) {
         finalHealth[p.name] = p.name === name ? healthRef.current : live.livePositions[p.name]?.health ?? p.health ?? 0
       }
       const maxHealth = Math.max(...Object.values(finalHealth))
+      // Scoring is ranked against the FULL field (NPCs included, same "beat everyone" premise the
+      // 100-player auto-fill was built for) via computeSurvivalScores - only real players actually
+      // receive a score (this round's -100..+100 result; not yet persisted anywhere beyond this
+      // room row - a cross-game leaderboard would need its own Supabase table, a separate task).
+      const healthFor = (p) => (p.isNpc ? live.livePositions[p.name]?.health ?? p.health ?? 0 : finalHealth[p.name])
+      const scores = computeSurvivalScores(currentRoom.players, healthFor)
       updateRoom(currentRoom.code, (room) => ({
         ...room,
         status: 'finished',
+        updatedAt: Date.now(),
         winners: room.players.filter((p) => finalHealth[p.name] === maxHealth).map((p) => p.name),
-        players: room.players.map((p) => (p.isNpc ? p : { ...p, health: finalHealth[p.name] }))
+        players: room.players.map((p) => {
+          if (p.isNpc) return p
+          const s = scores.get(p.name)
+          return { ...p, health: finalHealth[p.name], survivalRank: s?.rank ?? null, survivalScore: s?.score ?? null }
+        })
       }))
     }, 1000)
     return () => window.clearInterval(interval)
@@ -1966,10 +2047,14 @@ export default function App({ playerName, renameName, joinRequest }) {
       const live = liveRef.current
       const healthFor = (p) => (p.name === name ? healthRef.current : live.livePositions[p.name]?.health ?? p.health ?? 1000)
       let changed = false
+      // eliminatedAt (not just the boolean) lets the roster rank eliminated players by elimination
+      // order - first out finishes last, most recently cut ranks just above them, per direct
+      // feedback ("1st eliminated finishes 100th, 2nd = 99th, etc").
+      const eliminatedAt = Date.now()
       const nextPlayers = currentRoom.players.map((p) => {
         if (p.eliminated || healthFor(p) >= threshold) return p
         changed = true
-        return { ...p, eliminated: true }
+        return { ...p, eliminated: true, eliminatedAt }
       })
       if (changed) updateRoom(currentRoom.code, (room) => ({ ...room, players: nextPlayers }))
     }, 1000)
@@ -1984,7 +2069,7 @@ export default function App({ playerName, renameName, joinRequest }) {
     // excluded here too - an ambient bot just wandering around shouldn't count as a "survivor".
     const others = currentRoom.players.filter((p) => p.name !== currentRoom.itName && !p.isNpc)
     if (others.length && others.every((p) => p.eliminated)) {
-      updateRoom(currentRoom.code, (room) => (room.status === 'finished' ? room : { ...room, status: 'finished', winners: [room.itName] }))
+      updateRoom(currentRoom.code, (room) => (room.status === 'finished' ? room : { ...room, status: 'finished', updatedAt: Date.now(), winners: [room.itName] }))
       return
     }
     const durationMs = MODE_CONFIG.tag.roundDurationMs
@@ -1993,7 +2078,7 @@ export default function App({ playerName, renameName, joinRequest }) {
       updateRoom(currentRoom.code, (room) => {
         if (room.status === 'finished') return room
         const survivors = room.players.filter((p) => p.name !== room.itName && !p.eliminated && !p.isNpc)
-        return { ...room, status: 'finished', winners: survivors.map((p) => p.name) }
+        return { ...room, status: 'finished', updatedAt: Date.now(), winners: survivors.map((p) => p.name) }
       })
     }, 1000)
     return () => window.clearInterval(interval)
@@ -2250,7 +2335,10 @@ export default function App({ playerName, renameName, joinRequest }) {
     if (!isRoomHost || !joinedRoomCode || !graph) return
     const interval = window.setInterval(() => {
       const room = liveRef.current.currentRoom
-      if (!room) return
+      // Was just `if (!room) return` - NPCs kept driving, taking cloud damage, and broadcasting
+      // indefinitely after a round finished (no status check at all), which is why HP kept
+      // changing in the roster after "X won!" was already showing.
+      if (!room || room.status !== 'playing') return
       const npcs = room.players.filter((p) => p.isNpc)
       const activeNames = new Set(npcs.map((p) => p.name))
       for (const key of Object.keys(npcSimRef.current)) {
@@ -2535,6 +2623,9 @@ export default function App({ playerName, renameName, joinRequest }) {
             color: p.color,
             avatarId: p.avatarId,
             nextTurn: live.nextTurn,
+            // Survival-only - lets you gauge a nearby player/bot's threat level at a glance
+            // without opening the roster panel.
+            health: currentRoom.mode === 'survival' ? Math.round(live.health ?? p.health ?? 1000) : null,
             screenX: (point.x / width) * 100,
             screenY: (point.y / height) * 100
           }
@@ -2708,7 +2799,17 @@ export default function App({ playerName, renameName, joinRequest }) {
       }
       return p.name === name ? (p.foundItems || []).length : livePositions[p.name]?.foundCount ?? 0
     }
-    return [...currentRoom.players].sort((a, b) => scoreFor(b) - scoreFor(a))
+    return [...currentRoom.players].sort((a, b) => {
+      if (currentRoom.mode === 'survival') {
+        // Still-alive players always outrank eliminated ones, regardless of frozen health value.
+        // Among eliminated players, the most recently cut ranks best (eliminatedAt descending) -
+        // "1st eliminated finishes last, 2nd eliminated finishes 2nd-to-last" per direct feedback -
+        // rather than by their frozen health, which doesn't reflect elimination order at all.
+        if (Boolean(a.eliminated) !== Boolean(b.eliminated)) return a.eliminated ? 1 : -1
+        if (a.eliminated && b.eliminated) return (b.eliminatedAt ?? 0) - (a.eliminatedAt ?? 0)
+      }
+      return scoreFor(b) - scoreFor(a)
+    })
   }, [currentRoom, name, health, livePositions])
   // Survival rooms run up to 100 players - showing every row would make the panel unusable, so
   // only the top 5 plus your own row (wherever it falls) are shown, each tagged with its real
@@ -2769,6 +2870,11 @@ export default function App({ playerName, renameName, joinRequest }) {
       <div className="room-finished-title">{currentRoom.winners?.length ? `${currentRoom.winners.join(' & ')} won!` : 'Round finished'}</div>
       {currentRoom.roundStartedAt ? (
         <div className="room-finished-time">Round time: {formatDuration((currentRoom.updatedAt || Date.now()) - currentRoom.roundStartedAt)}</div>
+      ) : null}
+      {currentRoom.mode === 'survival' && currentPlayer?.survivalScore != null ? (
+        <div className="room-finished-score">
+          Finished #{currentPlayer.survivalRank} · {currentPlayer.survivalScore >= 0 ? '+' : ''}{currentPlayer.survivalScore} points
+        </div>
       ) : null}
       <button className="leave-room" onClick={leaveRoom}>Leave room</button>
     </div>

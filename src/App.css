@@ -269,6 +269,12 @@
   color: #5f6368;
 }
 
+.room-finished-score {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #202124;
+}
+
 .leave-room {
   background: #ffffff;
   color: #202124;
