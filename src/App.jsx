@@ -54,9 +54,10 @@ const CLOUD_MIN_COUNT = 10
 const CLOUD_MAX_COUNT = 20
 // Survival specifically needs a much denser field to actually be a threat - 12 small clouds
 // scattered over the whole bbox meant a player could drive for a full 10-minute round barely ever
-// overlapping one, health sitting at 1000 the entire time. 100 is deliberately dense.
-const CLOUD_MIN_COUNT_SURVIVAL = 100
-const CLOUD_MAX_COUNT_SURVIVAL = 120
+// overlapping one, health sitting at 1000 the entire time. Doubled from 100 to 200 per direct
+// feedback - with 50-player rooms, half the bots were still surviving a full round untouched.
+const CLOUD_MIN_COUNT_SURVIVAL = 200
+const CLOUD_MAX_COUNT_SURVIVAL = 220
 // Degrees of slack applied to CONFIG.bbox when deciding a drifting cloud has left the playable
 // area (~3km) - generous enough that wind drift only prunes clouds that have genuinely blown well
 // clear of the map, not ones still hovering near its edge.
