@@ -48,6 +48,13 @@ const CARDINAL_ANGLES = {
 // (Android Auto style) instead of snapping instantly to the new segment's direction.
 const MAX_BEARING_DEG_PER_SEC = 220
 const CLOUD_MOVE_INTERVAL_MS = 7000
+// Survival's movement tick runs 3x as often per direct feedback ("refresh rate x3") - clouds felt
+// nearly stationary otherwise.
+const SURVIVAL_CLOUD_MOVE_INTERVAL_MS = Math.round(CLOUD_MOVE_INTERVAL_MS / 3)
+// Every 2s, Survival forcibly adds one more cloud regardless of the min/max maintenance logic
+// below - over a 10-minute round that's +300 clouds on top of the 200 seeded at start, growing to
+// ~500 by the end. See SURVIVAL_CLOUD_SPAWN_INTERVAL_MS's effect further down.
+const SURVIVAL_CLOUD_SPAWN_INTERVAL_MS = 2000
 // Raised from the original 5/8 floor/ceiling - clouds now spread across the whole bbox instead of
 // clustering near one player, so a higher count is needed to keep the field feeling populated.
 const CLOUD_MIN_COUNT = 10
@@ -56,8 +63,11 @@ const CLOUD_MAX_COUNT = 20
 // scattered over the whole bbox meant a player could drive for a full 10-minute round barely ever
 // overlapping one, health sitting at 1000 the entire time. Doubled from 100 to 200 per direct
 // feedback - with 50-player rooms, half the bots were still surviving a full round untouched.
+// The ceiling is deliberately way above the floor now (600 vs 200) - the dedicated 2s spawn
+// effect is expected to grow the real count toward ~500 over a round, and this cap exists only as
+// a safety backstop (e.g. an extended debug round), not something a normal 10-minute round hits.
 const CLOUD_MIN_COUNT_SURVIVAL = 200
-const CLOUD_MAX_COUNT_SURVIVAL = 220
+const CLOUD_MAX_COUNT_SURVIVAL = 600
 // Degrees of slack applied to CONFIG.bbox when deciding a drifting cloud has left the playable
 // area (~3km) - generous enough that wind drift only prunes clouds that have genuinely blown well
 // clear of the map, not ones still hovering near its edge.
@@ -80,7 +90,10 @@ const DEBUG_ROUND_MS = (() => {
 export const MODE_CONFIG = {
   single: { label: 'Single', roomBased: false, hostGatedStart: false, minPlayers: 1, maxPlayers: 1, roundDurationMs: null, wideBbox: true },
   team: { label: 'Team', roomBased: true, hostGatedStart: false, minPlayers: 2, maxPlayers: 50, roundDurationMs: null, wideBbox: true },
-  survival: { label: 'Survival', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 50, roundDurationMs: DEBUG_ROUND_MS ?? 10 * 60 * 1000 },
+  // fixedPlayerCount: every Survival round is auto-filled with NPCs at start to reach exactly
+  // this many total (minPlayers 1 - a solo host can start, then gets 99 bots). maxPlayers must be
+  // at least fixedPlayerCount so a full-human lobby isn't blocked from starting.
+  survival: { label: 'Survival', roomBased: true, hostGatedStart: true, minPlayers: 1, maxPlayers: 100, fixedPlayerCount: 100, roundDurationMs: DEBUG_ROUND_MS ?? 10 * 60 * 1000 },
   'finder-easy': { label: 'Finder (Easy)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 50, roundDurationMs: null },
   'finder-roaming': { label: 'Finder (Roaming)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 50, roundDurationMs: null },
   'finder-hard': { label: 'Finder (Hard)', roomBased: true, hostGatedStart: true, minPlayers: 2, maxPlayers: 50, roundDurationMs: null },
@@ -1565,38 +1578,49 @@ export default function App({ playerName, renameName, joinRequest }) {
     return Object.values(live.livePositions || {}).some((p) => haversine([lat, lng], [p.lat, p.lng]) < threshold)
   }, [])
 
-  useEffect(() => {
-    const spawnCloud = () => {
-      const isSurvival = liveRef.current.currentRoom?.mode === 'survival'
-      // Exactly 2x for Survival per direct feedback (an earlier "almost twice, 1.75x" tuning was
-      // superseded - Survival was still too easy, and bigger clouds (not more of them) was judged
-      // the more logical fix). Always small - see randomSmallCloudRadius's comment for why big
-      // clouds are now "Add cloud"-only.
-      const radiusMeters = randomSmallCloudRadius(isSurvival ? 2 : 1)
-      // Retry a few times to avoid spawning right on top of a player; unlike before, give up on
-      // this spawn entirely if every attempt is still too close, rather than forcing a bad spawn -
-      // a cloud landing directly on a player instantly stripped their health with no way to react.
-      for (let attempt = 0; attempt < 10; attempt++) {
-        const { lat, lng } = randomPointInBbox()
-        if (!isTooCloseToAnyPlayer(lat, lng, radiusMeters)) {
-          return {
-            id: crypto.randomUUID(),
-            lat,
-            lng,
-            radiusMeters,
-            // Every mode's clouds get a visual tier now, not just Survival's - it only *drives
-            // damage* in Survival (gated separately, in the tick loop), elsewhere purely cosmetic.
-            tier: randomCloudTier(),
-            createdAt: Date.now(),
-            lifetimeMs: randomCloudLifetimeMs()
-          }
+  // Hoisted out of the movement-tick effect (was effect-local) so the separate "guaranteed spawn
+  // every 2s in Survival" effect below can use the exact same spawn logic instead of duplicating it.
+  const spawnCloud = useCallback(() => {
+    const isSurvival = liveRef.current.currentRoom?.mode === 'survival'
+    // Exactly 2x for Survival per direct feedback (an earlier "almost twice, 1.75x" tuning was
+    // superseded - Survival was still too easy, and bigger clouds (not more of them) was judged
+    // the more logical fix). Always small - see randomSmallCloudRadius's comment for why big
+    // clouds are now "Add cloud"-only.
+    const radiusMeters = randomSmallCloudRadius(isSurvival ? 2 : 1)
+    // Retry a few times to avoid spawning right on top of a player; unlike before, give up on
+    // this spawn entirely if every attempt is still too close, rather than forcing a bad spawn -
+    // a cloud landing directly on a player instantly stripped their health with no way to react.
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const { lat, lng } = randomPointInBbox()
+      if (!isTooCloseToAnyPlayer(lat, lng, radiusMeters)) {
+        return {
+          id: crypto.randomUUID(),
+          lat,
+          lng,
+          radiusMeters,
+          // Every mode's clouds get a visual tier now, not just Survival's - it only *drives
+          // damage* in Survival (gated separately, in the tick loop), elsewhere purely cosmetic.
+          tier: randomCloudTier(),
+          createdAt: Date.now(),
+          lifetimeMs: randomCloudLifetimeMs()
         }
       }
-      return null
     }
+    return null
+  }, [isTooCloseToAnyPlayer])
+
+  useEffect(() => {
+    const isSurvivalRoom = currentRoom?.mode === 'survival'
+    // Refresh rate x3 and wind x10 for Survival specifically, per direct feedback that clouds
+    // barely moved - both read fresh per-call via liveRef (not the closed-over currentRoom) so a
+    // room transitioning into/out of Survival mid-session doesn't need to wait for this effect to
+    // restart to pick up the right multiplier.
+    const moveIntervalMs = isSurvivalRoom ? SURVIVAL_CLOUD_MOVE_INTERVAL_MS : CLOUD_MOVE_INTERVAL_MS
 
     const driftAndPrune = (list) => {
-      const distanceMeters = (wind.speed / 3.6) * (CLOUD_MOVE_INTERVAL_MS / 1000)
+      const survivalNow = liveRef.current.currentRoom?.mode === 'survival'
+      const windSpeed = wind.speed * (survivalNow ? 10 : 1)
+      const distanceMeters = (windSpeed / 3.6) * (moveIntervalMs / 1000)
       const driftBearing = wind.angle ?? 0
       const now = Date.now()
       return list
@@ -1647,9 +1671,30 @@ export default function App({ playerName, renameName, joinRequest }) {
       }
     }
 
-    const interval = window.setInterval(moveClouds, CLOUD_MOVE_INTERVAL_MS)
+    const interval = window.setInterval(moveClouds, moveIntervalMs)
     return () => window.clearInterval(interval)
-  }, [wind])
+    // currentRoom?.mode (not the whole currentRoom object, which changes reference on every cloud
+    // write) is the only new dependency - it needs to restart the interval with the right period
+    // when a room transitions into/out of Survival, same looseness the rest of this effect already
+    // had toward currentRoom/isRoomHost/clouds/updateRoom (all read via closure, not listed here).
+  }, [wind, currentRoom?.mode])
+
+  // Survival-only guaranteed cloud growth: a fixed one-more-cloud-every-2s add, independent of the
+  // movement tick's own min/max maintenance above - that logic tops up toward a floor and trims at
+  // a ceiling, which caps how dense the field gets. This is a deliberately unbounded (up to the
+  // safety ceiling) growth curve instead, so the round gets harder as it goes rather than settling
+  // at a fixed density early on.
+  useEffect(() => {
+    if (!isRoomHost || currentRoom?.mode !== 'survival') return
+    const interval = window.setInterval(() => {
+      const room = liveRef.current.currentRoom
+      if (!room || room.mode !== 'survival' || room.status !== 'playing') return
+      const spawned = spawnCloud()
+      if (!spawned) return
+      updateRoom(room.code, (r) => ({ ...r, clouds: [...(r.clouds || []), spawned].slice(-CLOUD_MAX_COUNT_SURVIVAL) }))
+    }, SURVIVAL_CLOUD_SPAWN_INTERVAL_MS)
+    return () => window.clearInterval(interval)
+  }, [isRoomHost, currentRoom?.mode, spawnCloud, updateRoom])
 
   useEffect(() => {
     // Initialize default clouds for solo usage; room-host will overwrite when appropriate
@@ -1763,8 +1808,9 @@ export default function App({ playerName, renameName, joinRequest }) {
       if (Date.now() - currentRoom.roundStartedAt < durationMs) return
       const live = liveRef.current
       const finalHealth = {}
-      // NPCs are ambient-only (v1) - they never take damage, so including them here would let a
-      // bot sitting at full health "win" Survival by default every time.
+      // NPCs now take real cloud damage/regen too (see the ambient NPC tick effect), but still
+      // can't WIN - a bot getting randomly lucky and coasting at high health shouldn't beat a real
+      // player who actually played well, so they're excluded here regardless of their health.
       for (const p of currentRoom.players.filter((p) => !p.isNpc)) {
         finalHealth[p.name] = p.name === name ? healthRef.current : live.livePositions[p.name]?.health ?? p.health ?? 0
       }
@@ -1775,6 +1821,32 @@ export default function App({ playerName, renameName, joinRequest }) {
         winners: room.players.filter((p) => finalHealth[p.name] === maxHealth).map((p) => p.name),
         players: room.players.map((p) => (p.isNpc ? p : { ...p, health: finalHealth[p.name] }))
       }))
+    }, 1000)
+    return () => window.clearInterval(interval)
+  }, [isRoomHost, currentRoom, name, updateRoom])
+
+  // Survival deadline eliminations (host-only): forces the round to actually end for stragglers
+  // instead of everyone idling to 10 minutes untouched (with 100 players and thick cloud cover,
+  // literal idling was still winnable without this). Thresholds tighten over time - 50 HP at
+  // 2min, 100 at 5min, 200 at 8min - checked continuously against CURRENT health every tick, not
+  // just a one-time snapshot at the exact minute mark, so dropping below the active threshold at
+  // any point during its window gets you cut, not just exactly at :00. NPCs are eliminated the
+  // same as real players now that they take real cloud damage too.
+  useEffect(() => {
+    if (!isRoomHost || currentRoom?.mode !== 'survival' || currentRoom.status !== 'playing' || !currentRoom.roundStartedAt) return
+    const interval = window.setInterval(() => {
+      const elapsedMs = Date.now() - currentRoom.roundStartedAt
+      const threshold = elapsedMs >= 8 * 60000 ? 200 : elapsedMs >= 5 * 60000 ? 100 : elapsedMs >= 2 * 60000 ? 50 : null
+      if (threshold == null) return
+      const live = liveRef.current
+      const healthFor = (p) => (p.name === name ? healthRef.current : live.livePositions[p.name]?.health ?? p.health ?? 1000)
+      let changed = false
+      const nextPlayers = currentRoom.players.map((p) => {
+        if (p.eliminated || healthFor(p) >= threshold) return p
+        changed = true
+        return { ...p, eliminated: true }
+      })
+      if (changed) updateRoom(currentRoom.code, (room) => ({ ...room, players: nextPlayers }))
     }, 1000)
     return () => window.clearInterval(interval)
   }, [isRoomHost, currentRoom, name, updateRoom])
@@ -1805,12 +1877,33 @@ export default function App({ playerName, renameName, joinRequest }) {
   const startRoom = useCallback(() => {
     if (!currentRoom || !isRoomHost) return
     const cfg = MODE_CONFIG[currentRoom.mode]
-    const enoughPlayers = currentRoom.players.length >= cfg.minPlayers
-    const roundExtras = enoughPlayers ? buildRoundState(currentRoom.players, currentRoom.mode) : null
+    // Survival auto-fills with NPCs up to a fixed total instead of requiring them to be added
+    // manually ("Add NPC" is disabled for this mode - see its button below) - a solo host gets 99
+    // bots, a host + 5 friends gets 94, etc.
+    let basePlayers = currentRoom.players
+    if (cfg.fixedPlayerCount) {
+      const fillCount = Math.max(0, cfg.fixedPlayerCount - basePlayers.length)
+      const usedNames = basePlayers.map((p) => p.name)
+      const filled = []
+      for (let i = 0; i < fillCount; i++) {
+        const npcName = pickNpcName(usedNames)
+        usedNames.push(npcName)
+        filled.push({
+          name: npcName,
+          color: CAR_COLORS[Math.floor(Math.random() * CAR_COLORS.length)],
+          avatarId: AVATAR_ICONS[Math.floor(Math.random() * AVATAR_ICONS.length)].id,
+          eliminated: false,
+          isNpc: true
+        })
+      }
+      basePlayers = [...basePlayers, ...filled]
+    }
+    const enoughPlayers = basePlayers.length >= cfg.minPlayers
+    const roundExtras = enoughPlayers ? buildRoundState(basePlayers, currentRoom.mode) : null
     const nextRoom = {
       ...currentRoom,
       status: enoughPlayers ? 'playing' : 'waiting',
-      players: roundExtras ? roundExtras.players : currentRoom.players,
+      players: roundExtras ? roundExtras.players : basePlayers,
       itName: roundExtras ? roundExtras.itName : null,
       items: roundExtras ? roundExtras.items : [],
       clouds: roundExtras ? roundExtras.clouds : currentRoom.clouds,
@@ -2446,6 +2539,14 @@ export default function App({ playerName, renameName, joinRequest }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentRoom?.roundStartedAt, currentRoom?.status, currentRoom?.mode, clockTick])
 
+  // Survival's wind is 10x what's actually stored in `wind` state (see the cloud-drift effect) -
+  // this is purely the matching display value so the on-screen label doesn't undersell how fast
+  // clouds are actually moving.
+  const displayWind = useMemo(
+    () => (currentRoom?.mode === 'survival' ? { ...wind, speed: wind.speed * 10 } : wind),
+    [wind, currentRoom?.mode]
+  )
+
   // Room status/roster/items - shown both inside the pre-drive setup modal (so the host's Start
   // button is actually reachable while waiting for players, not hidden behind the modal) and in
   // the normal sidebar position once driving. Built once, referenced in whichever of those two
@@ -2465,6 +2566,52 @@ export default function App({ playerName, renameName, joinRequest }) {
     }
     return [...currentRoom.players].sort((a, b) => scoreFor(b) - scoreFor(a))
   }, [currentRoom, name, health, livePositions])
+  // Survival rooms run up to 100 players - showing every row would make the panel unusable, so
+  // only the top 5 plus your own row (wherever it falls) are shown, each tagged with its real
+  // rank so "I'm 64th" is still legible even though rows 6-63 aren't rendered.
+  const survivalRosterView = useMemo(() => {
+    if (currentRoom?.mode !== 'survival') return null
+    const ranked = sortedRosterPlayers.map((player, i) => ({ player, rank: i + 1 }))
+    const top5 = ranked.slice(0, 5)
+    const selfEntry = ranked.find((r) => r.player.name === name)
+    return {
+      top5,
+      selfEntry: selfEntry && selfEntry.rank > 5 ? selfEntry : null,
+      survivors: ranked.filter((r) => !r.player.eliminated).length,
+      total: ranked.length
+    }
+  }, [currentRoom, sortedRosterPlayers, name])
+  const renderPlayerRow = (player, rank) => {
+    const isSelf = player.name === name
+    const live = livePositions[player.name]
+    return (
+      <div key={player.name} className={`room-player-item${isSelf ? ' room-player-self' : ''}`}>
+        <span className="room-player-identity" style={{ color: player.color }}>
+          {rank ? <span className="room-player-rank">{String(rank).padStart(2, '0')}.</span> : null}
+          {player.name === currentRoom.host ? <span className="host-badge" title="Host - can add/remove NPCs">👑</span> : null}
+          <span className="room-player-avatar" dangerouslySetInnerHTML={{ __html: getAvatarSvg(player.avatarId) }} />
+          {player.name}
+          {player.isNpc ? ' (Bot)' : ''}
+          {currentRoom.itName === player.name ? ' (It)' : ''}
+        </span>
+        <span className="room-player-actions">
+          {currentRoom.mode === 'survival' ? (
+            <span className="player-status active">{Math.round(isSelf ? health : live?.health ?? player.health ?? 1000)} HP</span>
+          ) : isFinderMode(currentRoom.mode) ? (
+            <span className="player-status active">{isSelf ? (player.foundItems || []).length : live?.foundCount ?? 0}/{(currentRoom.items || []).length}</span>
+          ) : player.eliminated ? (
+            <span className="player-status">{currentRoom.mode === 'tag' ? 'Caught' : 'Eliminated'}</span>
+          ) : (
+            <span className="player-status active">Alive</span>
+          )}
+          {player.isNpc && isRoomHost ? (
+            <button className="room-meta-btn" onClick={() => removeNpc(player.name)} title="Remove NPC">x</button>
+          ) : null}
+        </span>
+      </div>
+    )
+  }
+
   // Round-finish report: no restart option (host or otherwise) and no auto-restart countdown -
   // whoever's still around just sees how it went and leaves whenever they're ready, no rush.
   // Wanting to play again means creating/joining a fresh room, same as any other new round.
@@ -2503,42 +2650,33 @@ export default function App({ playerName, renameName, joinRequest }) {
             <button
               className="room-meta-btn"
               onClick={addNpc}
-              disabled={currentRoom.players.length >= currentRoom.maxPlayers}
-              title={currentRoom.players.length >= currentRoom.maxPlayers ? 'Room is full' : 'Add an ambient NPC driver'}
+              disabled={currentRoom.mode === 'survival' || currentRoom.players.length >= currentRoom.maxPlayers}
+              title={
+                currentRoom.mode === 'survival'
+                  ? 'Survival auto-fills to 100 players at start'
+                  : currentRoom.players.length >= currentRoom.maxPlayers
+                  ? 'Room is full'
+                  : 'Add an ambient NPC driver'
+              }
             >
               + Add NPC
             </button>
           ) : null}
         </div>
-        {sortedRosterPlayers.map((player) => {
-          const isSelf = player.name === name
-          const live = livePositions[player.name]
-          return (
-            <div key={player.name} className="room-player-item">
-              <span className="room-player-identity" style={{ color: player.color }}>
-                {player.name === currentRoom.host ? <span className="host-badge" title="Host - can add/remove NPCs">👑</span> : null}
-                <span className="room-player-avatar" dangerouslySetInnerHTML={{ __html: getAvatarSvg(player.avatarId) }} />
-                {player.name}
-                {player.isNpc ? ' (Bot)' : ''}
-                {currentRoom.itName === player.name ? ' (It)' : ''}
-              </span>
-              <span className="room-player-actions">
-                {currentRoom.mode === 'survival' ? (
-                  <span className="player-status active">{Math.round(isSelf ? health : live?.health ?? player.health ?? 1000)} HP</span>
-                ) : isFinderMode(currentRoom.mode) ? (
-                  <span className="player-status active">{isSelf ? (player.foundItems || []).length : live?.foundCount ?? 0}/{(currentRoom.items || []).length}</span>
-                ) : player.eliminated ? (
-                  <span className="player-status">{currentRoom.mode === 'tag' ? 'Caught' : 'Eliminated'}</span>
-                ) : (
-                  <span className="player-status active">Alive</span>
-                )}
-                {player.isNpc && isRoomHost ? (
-                  <button className="room-meta-btn" onClick={() => removeNpc(player.name)} title="Remove NPC">x</button>
-                ) : null}
-              </span>
-            </div>
-          )
-        })}
+        {currentRoom.mode === 'survival' && survivalRosterView ? (
+          <>
+            <div className="survivor-count">{survivalRosterView.survivors}/{survivalRosterView.total} survivors</div>
+            {survivalRosterView.top5.map(({ player, rank }) => renderPlayerRow(player, rank))}
+            {survivalRosterView.selfEntry ? (
+              <>
+                <div className="roster-gap-divider" />
+                {renderPlayerRow(survivalRosterView.selfEntry.player, survivalRosterView.selfEntry.rank)}
+              </>
+            ) : null}
+          </>
+        ) : (
+          sortedRosterPlayers.map((player) => renderPlayerRow(player, null))
+        )}
       </div>
       {isFinderMode(currentRoom.mode) ? (
         <div className="item-tracker">
@@ -2712,7 +2850,9 @@ export default function App({ playerName, renameName, joinRequest }) {
               <button className={`cloud-button${turboButtonOn ? ' turbo-toggle-on' : ''}`} onClick={() => setTurboButtonOn((t) => !t)}>
                 {turboButtonOn ? 'Turbo: ON' : 'Turbo'}
               </button>
-              <button className="cloud-button" onClick={addCloud} disabled={cloudCooldown}>Add cloud</button>
+              {currentRoom?.mode === 'survival' ? null : (
+                <button className="cloud-button" onClick={addCloud} disabled={cloudCooldown}>Add cloud</button>
+              )}
               {joinedRoomCode ? (
                 <button className="leave-room" onClick={leaveRoom}>Leave room</button>
               ) : null}
@@ -2743,7 +2883,7 @@ export default function App({ playerName, renameName, joinRequest }) {
           <button className="cloud-button" onClick={zoomOut}>−</button>
           <button className="leave-room" onClick={quitGame}>Quit</button>
         </div>
-        <ScreenOverlay wind={wind} players={screenPlayers} items={screenItems} radarTargets={radarTargets} started={started} name={name} speedKmh={displayedSpeed} turboActive={turboActive} compassRef={compassRef} gameMessage={gameMessage} />
+        <ScreenOverlay wind={displayWind} players={screenPlayers} items={screenItems} radarTargets={radarTargets} started={started} name={name} speedKmh={displayedSpeed} turboActive={turboActive} compassRef={compassRef} gameMessage={gameMessage} />
       </div>
     </div>
   )

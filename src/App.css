@@ -288,6 +288,33 @@
   border-radius: 12px;
 }
 
+/* Survival's own row when it's shown separately below the top 5 (rank > 5) - needs to stand out
+   since it's visually disconnected from its actual rank position in the full list. */
+.room-player-self {
+  background: #e8f0fe;
+  border: 1px solid #4285f4;
+}
+
+.room-player-rank {
+  font-variant-numeric: tabular-nums;
+  color: #9aa0a6;
+  font-weight: 600;
+  margin-right: 2px;
+}
+
+.roster-gap-divider {
+  height: 1px;
+  background: #e8eaed;
+  margin: 2px 4px;
+}
+
+.survivor-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: #5f6368;
+  padding: 0 2px;
+}
+
 .room-player-identity {
   display: flex;
   align-items: center;
