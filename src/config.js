@@ -6,10 +6,13 @@ export const CONFIG = {
   // Tightened a bit further here too, pulled in from the west (a multi-slice scan of the real data
   // found legitimate Québec-tagged streets extend much further south around -71.30, likely
   // Sainte-Foy - sacrificed to keep the box centered tighter on downtown).
+  // south/north nudged slightly further out to fully contain Wendake and L'Ancienne-Lorette -
+  // two small enclave municipalities entirely surrounded by Québec (imported separately, see
+  // scripts/importEnclaveData.mjs) that otherwise showed as visible-but-roadless holes on the map.
   bbox: {
-    south: 46.79647881362492,
+    south: 46.7852971,
     west: -71.39947527908767,
-    north: 46.87402689541307,
+    north: 46.8775804,
     east: -71.19891865935556
   },
   // The full extent of Québec city's synced street network unioned with Lévis's (imported

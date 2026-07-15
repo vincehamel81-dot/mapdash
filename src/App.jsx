@@ -739,6 +739,10 @@ export default function App({ playerName, renameName, joinRequest }) {
   const [renaming, setRenaming] = useState(false)
   const [pickedSpawn, setPickedSpawn] = useState(null)
   const [pickingSpawn, setPickingSpawn] = useState(false)
+  const [leaderboardOpen, setLeaderboardOpen] = useState(false)
+  const [leaderboardRows, setLeaderboardRows] = useState([])
+  const [leaderboardLoading, setLeaderboardLoading] = useState(false)
+  const [leaderboardError, setLeaderboardError] = useState('')
   const mapBearingRef = useRef(0)
   const startedRef = useRef(false)
   const positionRef = useRef(defaultPosition)
@@ -1287,16 +1291,19 @@ export default function App({ playerName, renameName, joinRequest }) {
   useDrivingControls(started, handleControlsChange, handleZoomChange, flipDirection, northUpMode)
 
   useEffect(() => {
-    // Two files: Québec's own synced data (city==='Québec' throughout - Ville de Québec's
-    // open-data portal never covered Lévis), and Lévis's separately imported from the gumballquiz
-    // sibling project (see scripts/importLevisData.mjs) in the exact same schema. Only the wide
-    // bbox (Single/Team) ever needs Lévis - merged here regardless since it's cheap to carry the
-    // extra ~3800 rows and filter them out for the tight-bbox modes below.
+    // Three files: Québec's own synced data (city==='Québec' throughout - Ville de Québec's
+    // open-data portal never covered any of these), Lévis (wide-bbox modes only - a whole separate
+    // city), and the Wendake/L'Ancienne-Lorette enclaves (every mode - two small municipalities
+    // entirely surrounded by Québec, small enough to fit inside the tight bbox too). All three
+    // imported from the gumballquiz sibling project in the exact same schema (see
+    // scripts/importLevisData.mjs and scripts/importEnclaveData.mjs). Merged here regardless of
+    // mode - cheap to carry the extra rows and filter per-bbox below.
     Promise.all([
       fetch('/data/QBC/segments.json').then((res) => res.json()),
-      fetch('/data/QBC/segments-levis.json').then((res) => res.json())
+      fetch('/data/QBC/segments-levis.json').then((res) => res.json()),
+      fetch('/data/QBC/segments-enclaves.json').then((res) => res.json())
     ])
-      .then(([quebec, levis]) => setRawSegments([...quebec, ...levis]))
+      .then(([quebec, levis, enclaves]) => setRawSegments([...quebec, ...levis, ...enclaves]))
       .catch(() => {
         console.error('Unable to load street data')
       })
@@ -1306,10 +1313,10 @@ export default function App({ playerName, renameName, joinRequest }) {
 
   useEffect(() => {
     if (!rawSegments) return
-    // Two bbox variants share one raw fetch: the tight curated box (most modes, Québec only) and
-    // the wide full-region box (Single/Team, see MODE_CONFIG - Québec + Lévis). Each is
-    // filtered+built once and cached here - switching modes back and forth in the setup screen
-    // shouldn't rebuild a 20k+ segment graph every time.
+    // Two bbox variants share one raw fetch: the tight curated box (most modes, Québec + enclaves)
+    // and the wide full-region box (Single/Team, see MODE_CONFIG - Québec + Lévis + enclaves).
+    // Each is filtered+built once and cached here - switching modes back and forth in the setup
+    // screen shouldn't rebuild a 20k+ segment graph every time.
     const cacheKey = wideBboxMode ? 'wide' : 'tight'
     const cached = graphCacheRef.current[cacheKey]
     if (cached) {
@@ -1319,7 +1326,9 @@ export default function App({ playerName, renameName, joinRequest }) {
     }
     const box = wideBboxMode ? CONFIG.bboxWide : CONFIG.bbox
     const withinBbox = (poly) => poly.every(([lat, lng]) => lat >= box.south && lat <= box.north && lng >= box.west && lng <= box.east)
-    const allowedCities = wideBboxMode ? ['Québec', 'Lévis'] : ['Québec']
+    const allowedCities = wideBboxMode
+      ? ['Québec', 'Lévis', "L'Ancienne-Lorette", 'Wendake']
+      : ['Québec', "L'Ancienne-Lorette", 'Wendake']
     const filtered = rawSegments.filter((s) => allowedCities.includes(s.city) && withinBbox(s.polyline))
     const builtGraph = buildGraph(filtered)
     graphCacheRef.current[cacheKey] = { segments: filtered, graph: builtGraph }
@@ -2012,10 +2021,22 @@ export default function App({ playerName, renameName, joinRequest }) {
       const maxHealth = Math.max(...Object.values(finalHealth))
       // Scoring is ranked against the FULL field (NPCs included, same "beat everyone" premise the
       // 100-player auto-fill was built for) via computeSurvivalScores - only real players actually
-      // receive a score (this round's -100..+100 result; not yet persisted anywhere beyond this
-      // room row - a cross-game leaderboard would need its own Supabase table, a separate task).
+      // receive a score.
       const healthFor = (p) => (p.isNpc ? live.livePositions[p.name]?.health ?? p.health ?? 0 : finalHealth[p.name])
       const scores = computeSurvivalScores(currentRoom.players, healthFor)
+      // Persisted to the cross-game scores table (see supabase/migrations/0008-0009) via an atomic
+      // increment RPC, not a read-then-write - same class of race already found and fixed once for
+      // clouds. Fire-and-forget: this shouldn't block or fail the round-finish room update below.
+      if (isSupabaseConfigured) {
+        for (const p of currentRoom.players.filter((p) => !p.isNpc)) {
+          const s = scores.get(p.name)
+          if (s) {
+            supabase
+              .rpc('increment_score', { p_name_lower: p.name.toLowerCase(), p_display_name: p.name, p_delta: s.score })
+              .then(({ error }) => { if (error) console.error('[scores] increment failed:', error.message) })
+          }
+        }
+      }
       updateRoom(currentRoom.code, (room) => ({
         ...room,
         status: 'finished',
@@ -2831,6 +2852,26 @@ export default function App({ playerName, renameName, joinRequest }) {
       perfectCount: perfectCount > 5 ? perfectCount : null
     }
   }, [currentRoom, sortedRosterPlayers, name, health, livePositions])
+  const openLeaderboard = () => {
+    setLeaderboardOpen(true)
+    if (!isSupabaseConfigured) {
+      setLeaderboardError('Chat/leaderboard need Supabase configured.')
+      return
+    }
+    setLeaderboardLoading(true)
+    setLeaderboardError('')
+    // No .limit() - deliberately unbounded per direct feedback ("no need to limit, it could take
+    // a long time before we get to 10k users").
+    supabase
+      .from('scores')
+      .select('display_name, score')
+      .order('score', { ascending: false })
+      .then(({ data, error }) => {
+        setLeaderboardLoading(false)
+        if (error) { setLeaderboardError(error.message); return }
+        setLeaderboardRows(data || [])
+      })
+  }
   const renderPlayerRow = (player, rank) => {
     const isSelf = player.name === name
     const live = livePositions[player.name]
@@ -2956,6 +2997,35 @@ export default function App({ playerName, renameName, joinRequest }) {
     <div className="app-shell">
       <div className="app-sidebar">
         <div className="app-brand">MapDashRun <span className="app-brand-version">v{APP_VERSION}</span></div>
+        {leaderboardOpen ? (
+          <div className="leaderboard-backdrop" onClick={() => setLeaderboardOpen(false)}>
+            <div className="leaderboard-card" onClick={(e) => e.stopPropagation()}>
+              <div className="leaderboard-header">
+                <span>🏆 Survival Leaderboard</span>
+                <button className="room-meta-btn" onClick={() => setLeaderboardOpen(false)}>x</button>
+              </div>
+              {leaderboardLoading ? (
+                <div className="leaderboard-empty">Loading...</div>
+              ) : leaderboardError ? (
+                <div className="leaderboard-empty">{leaderboardError}</div>
+              ) : leaderboardRows.length ? (
+                <div className="leaderboard-list">
+                  {leaderboardRows.map((row, i) => (
+                    <div key={row.display_name} className="leaderboard-row">
+                      <span className="leaderboard-rank">{i + 1}.</span>
+                      <span className="leaderboard-name">{row.display_name}</span>
+                      <span className={`leaderboard-score${row.score >= 0 ? ' positive' : ' negative'}`}>
+                        {row.score >= 0 ? '+' : ''}{row.score}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="leaderboard-empty">No scores yet - finish a Survival round to get on the board.</div>
+              )}
+            </div>
+          </div>
+        ) : null}
         {!started && !pickingSpawn ? (
           <div className="setup-modal-backdrop">
             <div className="setup-modal-card">
@@ -2963,6 +3033,7 @@ export default function App({ playerName, renameName, joinRequest }) {
                 {Object.entries(MODE_CONFIG).map(([key, cfg]) => (
                   <button key={key} className={mode === key ? 'active' : ''} onClick={() => { setMode(key); setStarted(false) }}>{cfg.label}</button>
                 ))}
+                <button className="leaderboard-button" onClick={openLeaderboard}>🏆 Leaderboard</button>
               </div>
               <div className="lobby-panel">
                 <div className="lobby-name-display">

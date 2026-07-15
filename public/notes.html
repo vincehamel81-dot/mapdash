@@ -35,6 +35,14 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.4.0 (2026-07-14)</h2>
+<ul>
+  <li>Survival scores now actually persist across games (an atomic Postgres increment, not a naive read-then-write) - a running -100..+100 total per player</li>
+  <li>New 🏆 Leaderboard button next to the mode buttons, showing every player's all-time score ordered highest first</li>
+  <li>Added auto-cleanup for abandoned rooms (host tab closed mid-round, nothing left to mark it finished) - a scheduled database job deletes any room untouched for 30 minutes, regardless of status</li>
+  <li>Added Wendake and L'Ancienne-Lorette streets - two small municipalities entirely surrounded by Québec that were previously visible-but-roadless holes on the map, now drivable in every mode</li>
+</ul>
+
 <h2>Version 1.3.0 (2026-07-14)</h2>
 <ul>
   <li>Fixed a real bug: NPC and cloud simulation had no round-status check at all, so both kept running indefinitely after a round finished - HP kept changing and clouds kept growing even after "X won!" was already showing. Also fixed the round-finish timer display, which recomputed against the current time forever instead of freezing at the actual finish moment.</li>
