@@ -1220,3 +1220,180 @@ body, html, #root {
   padding: 0 16px;
   cursor: pointer;
 }
+
+/* ===== Mobile responsive (Phase 1: layout) =====
+   Below the breakpoint, .app-sidebar's own box becomes irrelevant - everything meaningful inside
+   it (.setup-modal-backdrop, the leaderboard modal, .mobile-drawer, .room-finished) already
+   positions itself as a fixed overlay, so .app-shell just needs to stop reserving a 320px column
+   for it and let .map-panel take the full viewport. */
+
+.mobile-menu-toggle {
+  display: none;
+}
+
+.mobile-drawer-backdrop {
+  display: none;
+}
+
+.touch-controls {
+  display: none;
+}
+
+/* Base (desktop) styling matches .app-sidebar's own flex/gap exactly - .mobile-drawer is a new
+   wrapper div between .app-sidebar and its children (roomStatusPanels, the settings panel), and
+   without this it would strip the 18px gap those two used to get for free as direct siblings under
+   .app-sidebar's own flex layout. Only repositioned into an off-canvas drawer inside the media
+   query below - on desktop this is invisible plumbing, not a new visual box. */
+.mobile-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+@media (max-width: 860px) {
+  .app-shell {
+    display: block;
+    position: relative;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  .map-panel {
+    width: 100%;
+    height: 100%;
+  }
+
+  .mobile-menu-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    top: 50px;
+    left: 12px;
+    z-index: 1950;
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    border: none;
+    background: rgba(255, 255, 255, 0.92);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+    font-size: 18px;
+    cursor: pointer;
+  }
+
+  .mobile-drawer-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.35);
+    z-index: 1900;
+  }
+
+  /* Everything that used to just sit in the always-visible sidebar column (roster, settings,
+     Turbo/Add cloud/Leave room) now lives in an off-canvas drawer, toggled by
+     .mobile-menu-toggle - same content, same components, just repositioned. */
+  .mobile-drawer {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 85vw;
+    max-width: 340px;
+    background: #ffffff;
+    z-index: 1920;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    box-shadow: 4px 0 16px rgba(0, 0, 0, 0.3);
+  }
+
+  .mobile-drawer.open {
+    transform: translateX(0);
+  }
+
+  /* Round-finish report needs to be reachable without opening the drawer - it's shown outside it
+     deliberately (see App.jsx) so it stays visible even while the drawer is closed. */
+  .room-finished {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 1940;
+    width: 85vw;
+    max-width: 340px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  }
+
+  /* On-screen WASD/Shift equivalent (see TouchControls in App.jsx). D-pad bottom-left for
+     thumb reach, Turbo isolated bottom-right so it can never be fat-fingered by a steering tap -
+     both sit above .overlay-bottom-left's speed pill and clear of .chat-panel's bottom-right
+     corner (18px/56px tall). touch-action:none stops the browser's own scroll/pinch gestures from
+     eating the pointer events these buttons need; user-select:none stops long-press text selection. */
+  .touch-controls {
+    display: block;
+  }
+
+  .touch-dpad {
+    position: fixed;
+    left: 14px;
+    bottom: 90px;
+    z-index: 1930;
+    display: grid;
+    grid-template-columns: 56px 56px 56px;
+    grid-template-rows: 56px 56px 56px;
+    gap: 4px;
+  }
+
+  .touch-btn {
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    border: none;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.85);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+    font-size: 22px;
+    color: #202124;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .touch-btn:active {
+    background: rgba(26, 115, 232, 0.9);
+    color: #ffffff;
+  }
+
+  .touch-btn-up { grid-column: 2; grid-row: 1; }
+  .touch-btn-left { grid-column: 1; grid-row: 2; }
+  .touch-btn-right { grid-column: 3; grid-row: 2; }
+  .touch-btn-down { grid-column: 2; grid-row: 3; }
+
+  .touch-btn-turbo {
+    position: fixed;
+    right: 14px;
+    bottom: 100px;
+    z-index: 1930;
+    width: 72px;
+    height: 72px;
+    border-radius: 999px;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    border: none;
+    background: rgba(255, 193, 7, 0.9);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+    font-size: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .touch-btn-turbo:active {
+    background: rgba(255, 152, 0, 1);
+  }
+}

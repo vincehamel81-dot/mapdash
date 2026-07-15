@@ -545,17 +545,31 @@ const defaultPosition = {
 }
 
 function useDrivingControls(started, onControlsChange, onZoomChange, onReverseTap, northUpMode) {
+  // Was effect-local (recreated fresh every mount) - hoisted to a ref so the touch API below
+  // (setTouchControl) can share the exact same pressed-state/update mechanism the keyboard
+  // handlers use, instead of needing a second parallel implementation.
+  const pressedRef = useRef({ forward: false, left: false, right: false, turbo: false, backward: false, reverseKeyDown: false })
+
+  const update = useCallback(() => {
+    const pressed = pressedRef.current
+    onControlsChange({ forward: pressed.forward, left: pressed.left, right: pressed.right, turbo: pressed.turbo, backward: pressed.backward })
+  }, [onControlsChange])
+
   useEffect(() => {
     if (!started) return
-
     // reverseKeyDown is purely internal edge-detection (so holding S doesn't repeat-fire the
     // flip on the browser's keydown auto-repeat) - it's never exposed via onControlsChange, since
     // S/ArrowDown is a one-shot action in the normal (rotating-map) mode, not a held control. In
     // north-up "Pac-Man style" mode (by direct request - a deliberately different mechanism from
     // the rotating map, where S is a held absolute-south command, not a facing flip), S/ArrowDown
     // behaves like forward/left/right instead: held = go, released = stop.
-    const pressed = { forward: false, left: false, right: false, turbo: false, backward: false, reverseKeyDown: false }
-    const update = () => onControlsChange({ forward: pressed.forward, left: pressed.left, right: pressed.right, turbo: pressed.turbo, backward: pressed.backward })
+    const pressed = pressedRef.current
+    pressed.forward = false
+    pressed.left = false
+    pressed.right = false
+    pressed.turbo = false
+    pressed.backward = false
+    pressed.reverseKeyDown = false
 
     const down = (e) => {
       const key = e.key
@@ -634,7 +648,61 @@ function useDrivingControls(started, onControlsChange, onZoomChange, onReverseTa
       window.removeEventListener('keydown', down)
       window.removeEventListener('keyup', up)
     }
-  }, [started, onControlsChange, onZoomChange, onReverseTap, northUpMode])
+  }, [started, update, onZoomChange, onReverseTap, northUpMode])
+
+  // Touch-facing equivalent of the keyboard handlers above, sharing the same pressed-state/update
+  // mechanism - each on-screen D-pad button calls this with (control, true) on touchstart/mousedown
+  // and (control, false) on touchend/mouseup/touchcancel. 'backward' mirrors the keyboard's S/
+  // ArrowDown split: a one-shot reverse-flip tap in the normal rotating-map mode, a held control in
+  // north-up mode.
+  const setTouchControl = useCallback(
+    (control, isPressed) => {
+      if (!started) return
+      const pressed = pressedRef.current
+      if (control === 'backward' && !northUpMode) {
+        if (isPressed && !pressed.reverseKeyDown) {
+          pressed.reverseKeyDown = true
+          onReverseTap()
+        } else if (!isPressed) {
+          pressed.reverseKeyDown = false
+        }
+        return
+      }
+      if (pressed[control] === isPressed) return
+      pressed[control] = isPressed
+      update()
+    },
+    [started, update, northUpMode, onReverseTap]
+  )
+
+  return { setTouchControl }
+}
+
+// On-screen equivalent of WASD/Shift, CSS-hidden above the mobile breakpoint (see App.css) - built
+// as its own component so its pointer-event wiring stays in one place, and so its onControl calls
+// go straight through useDrivingControls' own setTouchControl (see above), never touching
+// controls/movement logic directly. Pointer Events (not separate touch/mouse listeners) so it
+// works the same whether the "touch" is an actual finger, a mouse click, or devtools touch
+// emulation - onPointerLeave/onPointerCancel release the control if a finger slides off the button
+// or the gesture gets interrupted, so nothing can get stuck "held".
+function TouchControls({ onControl }) {
+  const bind = (control) => ({
+    onPointerDown: (e) => { e.preventDefault(); onControl(control, true) },
+    onPointerUp: () => onControl(control, false),
+    onPointerLeave: () => onControl(control, false),
+    onPointerCancel: () => onControl(control, false)
+  })
+  return (
+    <div className="touch-controls">
+      <div className="touch-dpad">
+        <button className="touch-btn touch-btn-up" {...bind('forward')}>▲</button>
+        <button className="touch-btn touch-btn-left" {...bind('left')}>◀</button>
+        <button className="touch-btn touch-btn-right" {...bind('right')}>▶</button>
+        <button className="touch-btn touch-btn-down" {...bind('backward')}>▼</button>
+      </div>
+      <button className="touch-btn touch-btn-turbo" {...bind('turbo')}>⚡</button>
+    </div>
+  )
 }
 
 function ScreenOverlay({ wind, players = [], items = [], radarTargets = [], started, name, speedKmh, turboActive, compassRef, gameMessage }) {
@@ -748,6 +816,7 @@ export default function App({ playerName, renameName, joinRequest }) {
   })
   const [pickingSpawn, setPickingSpawn] = useState(false)
   const [leaderboardOpen, setLeaderboardOpen] = useState(false)
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [leaderboardRows, setLeaderboardRows] = useState([])
   const [leaderboardLoading, setLeaderboardLoading] = useState(false)
   const [leaderboardError, setLeaderboardError] = useState('')
@@ -1296,7 +1365,7 @@ export default function App({ playerName, renameName, joinRequest }) {
     movementRef.current.direction *= -1
   }, [])
 
-  useDrivingControls(started, handleControlsChange, handleZoomChange, flipDirection, northUpMode)
+  const { setTouchControl } = useDrivingControls(started, handleControlsChange, handleZoomChange, flipDirection, northUpMode)
 
   useEffect(() => {
     // Three files: Québec's own synced data (city==='Québec' throughout - Ville de Québec's
@@ -3161,53 +3230,67 @@ export default function App({ playerName, renameName, joinRequest }) {
             </div>
           </div>
         ) : null}
-        {started ? roomStatusPanels : null}
-        {started ? roundReportPanel : null}
         {started ? (
-          <div className="status-panel">
-            <div className="center-toggle">
-              <label>
-                <input type="checkbox" checked={showStreetNames} onChange={(e) => setShowStreetNames(e.target.checked)} /> Street names
-              </label>
+          <>
+            {/* Only visible below the mobile breakpoint (see App.css) - on desktop this sits in
+                the always-visible sidebar column, same as before. */}
+            <button
+              className="mobile-menu-toggle"
+              onClick={() => setMobileMenuOpen((v) => !v)}
+              title={mobileMenuOpen ? 'Close menu' : 'Open menu'}
+            >
+              {mobileMenuOpen ? '✕' : '☰'}
+            </button>
+            {mobileMenuOpen ? <div className="mobile-drawer-backdrop" onClick={() => setMobileMenuOpen(false)} /> : null}
+            <div className={`mobile-drawer${mobileMenuOpen ? ' open' : ''}`}>
+              {roomStatusPanels}
+              <div className="status-panel">
+                <div className="center-toggle">
+                  <label>
+                    <input type="checkbox" checked={showStreetNames} onChange={(e) => setShowStreetNames(e.target.checked)} /> Street names
+                  </label>
+                </div>
+                <div className="center-toggle">
+                  <label>
+                    <input type="checkbox" checked={showRouteLine} onChange={(e) => setShowRouteLine(e.target.checked)} /> Show route line
+                  </label>
+                </div>
+                <div className="center-toggle">
+                  <label>
+                    <input type="checkbox" checked={northUpMode} onChange={(e) => setNorthUpMode(e.target.checked)} /> North-up fixed map
+                  </label>
+                </div>
+                <div className="center-toggle">
+                  <label>
+                    <input type="checkbox" checked={showDebugGraph} onChange={(e) => setShowDebugGraph(e.target.checked)} /> Debug: street graph
+                  </label>
+                </div>
+                <div className="center-toggle">
+                  <label>
+                    Map style:{' '}
+                    <select value={themeId} onChange={(e) => setThemeId(e.target.value)}>
+                      {Object.keys(THEMES).map((id) => (
+                        <option key={id} value={id}>{THEMES[id].name}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <div className="action-button-row">
+                  <button className={`cloud-button${turboButtonOn ? ' turbo-toggle-on' : ''}`} onClick={() => setTurboButtonOn((t) => !t)}>
+                    {turboButtonOn ? 'Turbo: ON' : 'Turbo'}
+                  </button>
+                  {currentRoom?.mode === 'survival' ? null : (
+                    <button className="cloud-button" onClick={addCloud} disabled={cloudCooldown}>Add cloud</button>
+                  )}
+                  {joinedRoomCode ? (
+                    <button className="leave-room" onClick={leaveRoom}>Leave room</button>
+                  ) : null}
+                </div>
+              </div>
             </div>
-            <div className="center-toggle">
-              <label>
-                <input type="checkbox" checked={showRouteLine} onChange={(e) => setShowRouteLine(e.target.checked)} /> Show route line
-              </label>
-            </div>
-            <div className="center-toggle">
-              <label>
-                <input type="checkbox" checked={northUpMode} onChange={(e) => setNorthUpMode(e.target.checked)} /> North-up fixed map
-              </label>
-            </div>
-            <div className="center-toggle">
-              <label>
-                <input type="checkbox" checked={showDebugGraph} onChange={(e) => setShowDebugGraph(e.target.checked)} /> Debug: street graph
-              </label>
-            </div>
-            <div className="center-toggle">
-              <label>
-                Map style:{' '}
-                <select value={themeId} onChange={(e) => setThemeId(e.target.value)}>
-                  {Object.keys(THEMES).map((id) => (
-                    <option key={id} value={id}>{THEMES[id].name}</option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <div className="action-button-row">
-              <button className={`cloud-button${turboButtonOn ? ' turbo-toggle-on' : ''}`} onClick={() => setTurboButtonOn((t) => !t)}>
-                {turboButtonOn ? 'Turbo: ON' : 'Turbo'}
-              </button>
-              {currentRoom?.mode === 'survival' ? null : (
-                <button className="cloud-button" onClick={addCloud} disabled={cloudCooldown}>Add cloud</button>
-              )}
-              {joinedRoomCode ? (
-                <button className="leave-room" onClick={leaveRoom}>Leave room</button>
-              ) : null}
-            </div>
-          </div>
+          </>
         ) : null}
+        {started ? roundReportPanel : null}
       </div>
       <div className="map-panel">
         <MapView
@@ -3233,6 +3316,7 @@ export default function App({ playerName, renameName, joinRequest }) {
           <button className="leave-room" onClick={quitGame}>Quit</button>
         </div>
         <ScreenOverlay wind={displayWind} players={screenPlayers} items={screenItems} radarTargets={radarTargets} started={started} name={name} speedKmh={displayedSpeed} turboActive={turboActive} compassRef={compassRef} gameMessage={gameMessage} />
+        {started ? <TouchControls onControl={setTouchControl} /> : null}
       </div>
     </div>
   )
