@@ -35,6 +35,14 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.5.0 (2026-07-14)</h2>
+<ul>
+  <li>Start point now persists across sessions (localStorage) instead of resetting to default every game</li>
+  <li>Scores now start at 1000 (not 0) and can never drop below 0, matching the intended design</li>
+  <li>Scores table now supports multiple game types (game_type column) ahead of Finder/Tag getting their own scoring later</li>
+  <li>Fixed a widespread street-graph issue: two directly-reported "broken street" spots turned out to be part of a much larger pattern (1,244 similar gaps found city-wide) where the graph's node-merge tolerance was just barely too tight (12-15m) for real gaps in the source data (up to ~25m) - widened it after directly testing that doing so only improved graph quality, no downside found</li>
+</ul>
+
 <h2>Version 1.4.0 (2026-07-14)</h2>
 <ul>
   <li>Survival scores now actually persist across games (an atomic Postgres increment, not a naive read-then-write) - a running -100..+100 total per player</li>

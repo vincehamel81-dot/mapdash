@@ -75,7 +75,14 @@ export function packageSegment(segment) {
 // two segments that physically meet often don't share an exact polyline endpoint. Merge nodes
 // that are within `toleranceMeters` of each other into one logical intersection so the movement
 // graph is actually navigable, using a grid-bucketed union-find to keep this fast at ~27k nodes.
-const DEFAULT_NODE_MERGE_TOLERANCE_METERS = 12
+// Raised from 12m to 25m after two directly-reported "broken street" spots (visible gaps in the
+// debug overlay) both turned out to be genuine data gaps just above the old tolerance (13m and
+// 18m) - a city-wide scan found 1,244 more of the same pattern (same street name, two unmerged
+// node clusters within 25m of each other), not just the couple found by driving around. Tested
+// tolerance from 12-30m directly against the real data: gap count and the existing
+// findRiskyIntersections count both dropped monotonically the whole way with no reversal at any
+// step, so this isn't a tradeoff - 25m is where the scanned gaps hit zero.
+const DEFAULT_NODE_MERGE_TOLERANCE_METERS = 25
 
 function createUnionFind(size) {
   const parent = new Array(size)
@@ -165,7 +172,9 @@ function mergeNearbyNodes(rawNodes, toleranceMeters) {
 // T-intersection). Fix that by snapping each dangling endpoint to the nearest touch point on any
 // other polyline within tolerance, splitting the touched polyline there so the graph gains a real
 // shared node. A grid index over polyline vertices keeps the nearest-edge search fast at scale.
-const INTERSECTION_SNAP_TOLERANCE_METERS = 15
+// Widened alongside DEFAULT_NODE_MERGE_TOLERANCE_METERS - see its comment for the direct
+// investigation (two reported spots, city-wide scan, tolerance tuning) behind this change.
+const INTERSECTION_SNAP_TOLERANCE_METERS = 25
 const VERTEX_GRID_CELL_METERS = 40
 
 function gridCellCoords([lat, lng], refLat, cellSize) {

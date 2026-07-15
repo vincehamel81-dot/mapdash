@@ -737,7 +737,15 @@ export default function App({ playerName, renameName, joinRequest }) {
   const [renameInput, setRenameInput] = useState('')
   const [renameError, setRenameError] = useState('')
   const [renaming, setRenaming] = useState(false)
-  const [pickedSpawn, setPickedSpawn] = useState(null)
+  // Persisted across sessions so a favorite start point doesn't need re-picking every game.
+  const [pickedSpawn, setPickedSpawn] = useState(() => {
+    try {
+      const raw = localStorage.getItem('mapdashrun_pickedSpawn')
+      return raw ? JSON.parse(raw) : null
+    } catch {
+      return null
+    }
+  })
   const [pickingSpawn, setPickingSpawn] = useState(false)
   const [leaderboardOpen, setLeaderboardOpen] = useState(false)
   const [leaderboardRows, setLeaderboardRows] = useState([])
@@ -1367,6 +1375,13 @@ export default function App({ playerName, renameName, joinRequest }) {
     if (started) return
     setCurrentEdgeId(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pickedSpawn])
+
+  useEffect(() => {
+    try {
+      if (pickedSpawn) localStorage.setItem('mapdashrun_pickedSpawn', JSON.stringify(pickedSpawn))
+      else localStorage.removeItem('mapdashrun_pickedSpawn')
+    } catch {}
   }, [pickedSpawn])
 
   useEffect(() => {
@@ -2032,7 +2047,7 @@ export default function App({ playerName, renameName, joinRequest }) {
           const s = scores.get(p.name)
           if (s) {
             supabase
-              .rpc('increment_score', { p_name_lower: p.name.toLowerCase(), p_display_name: p.name, p_delta: s.score })
+              .rpc('increment_score', { p_name_lower: p.name.toLowerCase(), p_display_name: p.name, p_game_type: 'survival', p_delta: s.score })
               .then(({ error }) => { if (error) console.error('[scores] increment failed:', error.message) })
           }
         }
@@ -2862,9 +2877,12 @@ export default function App({ playerName, renameName, joinRequest }) {
     setLeaderboardError('')
     // No .limit() - deliberately unbounded per direct feedback ("no need to limit, it could take
     // a long time before we get to 10k users").
+    // Survival-only for now - the scores table now has a row per (player, game_type) since other
+    // modes are getting their own scoring later (see 0011_score_baseline_and_game_type.sql).
     supabase
       .from('scores')
       .select('display_name, score')
+      .eq('game_type', 'survival')
       .order('score', { ascending: false })
       .then(({ data, error }) => {
         setLeaderboardLoading(false)
