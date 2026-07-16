@@ -15,7 +15,7 @@ const ONLINE_STALE_MS = 90000
 // you're mutually connected to, chronologically. A friend of a friend you're not yourself mutually
 // connected to is invisible to you, even inside a message thread they're part of - visibility is
 // purely "am I mutually accepted with the sender", nothing more.
-export default function ChatPanel({ myName, onRequestJoin }) {
+export default function ChatPanel({ myName, onRequestJoin, onRequestSpectate }) {
   const [open, setOpen] = useState(false)
   const [onlinePlayers, setOnlinePlayers] = useState([])
   const [friendRows, setFriendRows] = useState([]) // every row where I'm the follower, any status
@@ -261,6 +261,14 @@ export default function ChatPanel({ myName, onRequestJoin }) {
     return 'Online'
   }
 
+  // Same predicate the room list in App.jsx already uses to decide a room can't just be freely
+  // joined (hostGatedStart modes only - Team's status is 'playing' the instant it's created, but
+  // that's not a "round in progress" you'd be interrupting). Joining an in-progress round like that
+  // already fails with an alert in joinRoom - Spectate is the actual way in for one.
+  function isRoomInProgress(online) {
+    return Boolean(online?.room_code) && MODE_CONFIG[online.room_mode]?.hostGatedStart && online.room_status === 'playing'
+  }
+
   function formatTime(iso) {
     return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   }
@@ -302,7 +310,11 @@ export default function ChatPanel({ myName, onRequestJoin }) {
                     <span>{f.followed_display_name}</span>
                     <span className="chat-status-label">{statusLabel(online)}</span>
                     {online?.room_code ? (
-                      <button className="chat-join" onClick={() => onRequestJoin?.(online.room_code)} title="Join their room">Join</button>
+                      isRoomInProgress(online) ? (
+                        <button className="chat-join" onClick={() => onRequestSpectate?.(online.room_code)} title="Watch their game">Spectate</button>
+                      ) : (
+                        <button className="chat-join" onClick={() => onRequestJoin?.(online.room_code)} title="Join their room">Join</button>
+                      )
                     ) : null}
                     <button className="chat-remove" onClick={() => removeFriend(f.followed_name_lower)} title="Remove friend">x</button>
                   </div>
@@ -315,7 +327,11 @@ export default function ChatPanel({ myName, onRequestJoin }) {
                   <span>{p.display_name}</span>
                   <span className="chat-status-label">{statusLabel(p)}</span>
                   {p.room_code ? (
-                    <button className="chat-join" onClick={() => onRequestJoin?.(p.room_code)} title="Join their room">Join</button>
+                    isRoomInProgress(p) ? (
+                      <button className="chat-join" onClick={() => onRequestSpectate?.(p.room_code)} title="Watch their game">Spectate</button>
+                    ) : (
+                      <button className="chat-join" onClick={() => onRequestJoin?.(p.room_code)} title="Join their room">Join</button>
+                    )
                   ) : null}
                   {pendingSentSet.has(p.name_lower) ? (
                     <span className="chat-following">requested</span>

@@ -145,6 +145,61 @@ function showsItemIcons(mode) {
   return mode === 'finder-easy' || mode === 'finder-roaming'
 }
 
+// Extracted so the same screen-projection math can be shared between a real player's own room
+// view (screenPlayers/screenItems below) and a spectator's read-only one (spectateScreenPlayers/
+// spectateScreenItems) - both just call these with a different `room`, nothing else differs.
+function computeScreenPlayers(room, selfName, livePositions, map) {
+  if (!room || !map) return []
+  try {
+    const container = map.getContainer()
+    const width = container.clientWidth
+    const height = container.clientHeight
+    // Eliminated players (caught in Tag) are removed from the map entirely, not just dimmed - once
+    // you're out, you're out, same as how a Tag round already treats you.
+    return room.players
+      .filter((p) => p.name !== selfName && !p.eliminated && livePositions[p.name])
+      .map((p) => {
+        const live = livePositions[p.name]
+        const point = map.project([live.lng, live.lat])
+        return {
+          name: p.name,
+          color: p.color,
+          avatarId: p.avatarId,
+          nextTurn: live.nextTurn,
+          // Survival-only - lets you gauge a nearby player/bot's threat level at a glance without
+          // opening the roster panel.
+          health: room.mode === 'survival' ? Math.round(live.health ?? p.health ?? 1000) : null,
+          screenX: (point.x / width) * 100,
+          screenY: (point.y / height) * 100
+        }
+      })
+  } catch {
+    return []
+  }
+}
+
+function computeScreenItems(room, foundIds, liveItemPositions, map) {
+  if (!showsItemIcons(room?.mode) || !map) return []
+  try {
+    const container = map.getContainer()
+    const width = container.clientWidth
+    const height = container.clientHeight
+    return (room.items || [])
+      .filter((item) => !foundIds.includes(item.id))
+      .map((item) => {
+        // Roaming items' real position is wherever they've actually walked to (broadcast) - the
+        // stored lat/lng is just the round-start spawn, stale the instant a roaming item moves.
+        const live = liveItemPositions[item.id]
+        const lat = live?.lat ?? item.lat
+        const lng = live?.lng ?? item.lng
+        const point = map.project([lng, lat])
+        return { id: item.id, iconId: item.iconId, label: item.label, screenX: (point.x / width) * 100, screenY: (point.y / height) * 100 }
+      })
+  } catch {
+    return []
+  }
+}
+
 // Ambient NPC drivers (v1): real simulated movement on the street graph (see
 // pickRandomNextSegment), but deliberately don't affect win conditions - can't be tagged/become
 // It, can't find items, don't take damage. Host's client alone simulates + broadcasts every NPC's
@@ -906,7 +961,7 @@ function ScreenOverlay({ wind, players = [], items = [], radarTargets = [], star
   )
 }
 
-export default function App({ playerName, renameName, joinRequest }) {
+export default function App({ playerName, renameName, joinRequest, spectateRequest }) {
   const [mode, setMode] = useState('single')
   // Host's choice of who's It for the next Tag round - '' means "no preference, pick randomly"
   // (see resetPlayersForRound's tag branch). Lobby-only UI, host-only.
@@ -943,6 +998,10 @@ export default function App({ playerName, renameName, joinRequest }) {
   const [cloudCooldown, setCloudCooldown] = useState(false)
   const [rooms, setRooms, roomsRef, deleteRoom] = useRoomSync()
   const [joinedRoomCode, setJoinedRoomCode] = useState(null)
+  // Spectating is deliberately a separate code from joinedRoomCode, not a variant of it - a
+  // spectator is never a player in the room (no seat taken, no broadcasted position of their own),
+  // just watching. Mutually exclusive with joinedRoomCode in practice (see spectateRoom/joinRoom).
+  const [spectateRoomCode, setSpectateRoomCode] = useState(null)
   const [eliminated, setEliminated] = useState(false)
   const [gameMessage, setGameMessage] = useState('')
   const [mapReady, setMapReady] = useState(false)
@@ -1187,6 +1246,22 @@ export default function App({ playerName, renameName, joinRequest }) {
 
   const isRoomHost = useMemo(() => currentRoom?.host === name, [currentRoom, name])
 
+  // Same "look it up in the global rooms list" shape as currentRoom above - rooms already holds
+  // every active room regardless of whether this client has joined it, so spectating needs no
+  // separate fetch/subscription for room structure, just a second lookup key.
+  const spectatingRoom = useMemo(
+    () => rooms.find((room) => room.code === spectateRoomCode) || null,
+    [rooms, spectateRoomCode]
+  )
+  const spectating = Boolean(spectateRoomCode)
+
+  // If the room being watched gets deleted (host closed it, or the stale-room cleanup job caught
+  // it), spectatingRoom quietly becomes null - bounce back to the lobby instead of leaving the
+  // spectator staring at an empty read-only panel with no way to tell what happened.
+  useEffect(() => {
+    if (spectateRoomCode && !spectatingRoom) setSpectateRoomCode(null)
+  }, [spectateRoomCode, spectatingRoom])
+
   // Being eliminated (Tag's contact-elimination or Survival's deadline cuts) drops you back to the
   // setup screen, still joined to the same (still-active) room - the Room code input previously
   // kept showing that room's own code, so clicking "Create room" collided with it ("already
@@ -1264,11 +1339,16 @@ export default function App({ playerName, renameName, joinRequest }) {
     setClouds([])
     setMegaCloud(null)
     setEliminated(false)
-    if (!isSupabaseConfigured || !joinedRoomCode) {
+    // Spectating subscribes to the exact same per-room broadcast channel a real player's client
+    // would - it's the only source of live position/health/item movement (never the database, see
+    // above), so watching a room without it would show a static, un-moving roster. joinedRoomCode
+    // and spectateRoomCode are mutually exclusive in practice (see spectateRoom/joinRoom).
+    const watchedRoomCode = joinedRoomCode || spectateRoomCode
+    if (!isSupabaseConfigured || !watchedRoomCode) {
       roomChannelRef.current = null
       return
     }
-    const channel = supabase.channel(`room:${joinedRoomCode}`)
+    const channel = supabase.channel(`room:${watchedRoomCode}`)
     // A real player's own position - one broadcast per player, never batched (nothing to batch,
     // there's only ever one).
     channel.on('broadcast', { event: 'position' }, ({ payload }) => {
@@ -1308,7 +1388,7 @@ export default function App({ playerName, renameName, joinRequest }) {
       supabase.removeChannel(channel)
       roomChannelRef.current = null
     }
-  }, [joinedRoomCode, name])
+  }, [joinedRoomCode, spectateRoomCode, name])
 
   useEffect(() => {
     if (!currentRoom) {
@@ -1716,6 +1796,10 @@ export default function App({ playerName, renameName, joinRequest }) {
 
   useEffect(() => {
     if (animationRef.current) cancelAnimationFrame(animationRef.current)
+    // A spectator has no local car at all - nothing to compute here, and running it anyway would
+    // just be wasted per-frame work (the camera-follow/broadcast side effects further down are
+    // already separately gated on startedRef, but the segment-movement math itself isn't).
+    if (spectating) return
     const lastTimeRef = { current: null }
     const tick = (time) => {
       if (!currentSegment) {
@@ -1952,7 +2036,7 @@ export default function App({ playerName, renameName, joinRequest }) {
     }
     animationRef.current = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(animationRef.current)
-  }, [currentSegment, displayedSpeed, currentEdgeId, controls, graph, turnPreference])
+  }, [currentSegment, displayedSpeed, currentEdgeId, controls, graph, turnPreference, spectating])
 
   // Position + bearing are driven imperatively every frame from inside the movement tick loop
   // above; this effect only needs to react to the zoom buttons/keys, which change far less often.
@@ -2640,6 +2724,10 @@ export default function App({ playerName, renameName, joinRequest }) {
         alert('Enter a room code to join.')
         return
       }
+      // Joining always supersedes spectating - keeps the two mutually exclusive so isRoomHost (and
+      // anything else scoped to currentRoom/joinedRoomCode) never has to consider "host of some
+      // other room while spectating this one" as a real case.
+      setSpectateRoomCode(null)
       // roomsRef instead of the closed-over `rooms` state, same reasoning/fix as createRoom above
       // - confirmed as the likely cause of "join twice, kicks you out": a stale `rooms` snapshot
       // here could compute nextRooms from before some other pending update landed, dropping it.
@@ -2692,6 +2780,48 @@ export default function App({ playerName, renameName, joinRequest }) {
     },
     [roomCode, selectedColor, selectedAvatarId, name, currentPlayer, setRooms, roomsRef]
   )
+
+  // Spectating never touches `rooms`/players at all - unlike joinRoom, there's no seat to take, so
+  // this only ever sets local state. Falls back to a normal (re)join if the "spectator" turns out
+  // to already be a player in that room - shouldn't be reachable from the chat UI (Spectate only
+  // shows for rooms you're not already in), but defensive rather than silently doing nothing.
+  const spectateRoom = useCallback(
+    (code) => {
+      const room = roomsRef.current.find((item) => item.code === code)
+      if (!room) {
+        alert('Room not found.')
+        return
+      }
+      if (room.players.some((player) => player.name === name)) {
+        joinRoom(code)
+        return
+      }
+      // Leaving whatever room this client is actually a player in first (via the same ref
+      // indirection joinedRoomCode-related code elsewhere in this file already uses to dodge
+      // stale-closure bugs - see leaveRoomRef's own declaration comment) - keeps joinedRoomCode and
+      // spectateRoomCode mutually exclusive, same as joinRoom clearing spectateRoomCode above.
+      if (joinedRoomCode) leaveRoomRef.current?.()
+      // Also clears solo/no-room driving (Single, or Cloud, which has no joinedRoomCode at all) -
+      // without this, clicking Spectate mid-solo-drive would leave `started` true, and the
+      // driving sidebar/HUD would render at the same time as the spectate one.
+      setStarted(false)
+      setPickingSpawn(false)
+      setSpectateRoomCode(code)
+    },
+    [name, roomsRef, joinRoom, joinedRoomCode]
+  )
+
+  const leaveSpectate = useCallback(() => setSpectateRoomCode(null), [])
+
+  // "Spectate" from ChatPanel: same lifted-command-channel shape as the joinRequest effect right
+  // below (main.jsx has no other way to hand App a cross-component instruction).
+  const lastSpectateRequestRef = useRef(null)
+  useEffect(() => {
+    if (!spectateRequest || spectateRequest.ts === lastSpectateRequestRef.current) return
+    lastSpectateRequestRef.current = spectateRequest.ts
+    spectateRoom(spectateRequest.code)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spectateRequest])
 
   // Host-only: adds one ambient NPC driver to the room roster. Reads roomsRef (not the closed-over
   // `currentRoom`) for the same reason createRoom/joinRoom do - see their comments above.
@@ -3014,40 +3144,13 @@ export default function App({ playerName, renameName, joinRequest }) {
 
   // Roster fields (color/eliminated) come from the persisted room; live lat/lng comes from the
   // broadcast channel above - a player has no dot until their first broadcast arrives.
-  const screenPlayers = useMemo(() => {
-    if (!currentRoom || !mapRef.current) return []
-    try {
-      const map = mapRef.current
-      const container = map.getContainer()
-      const width = container.clientWidth
-      const height = container.clientHeight
-      // Eliminated players (caught in Tag) are removed from the map entirely, not just dimmed -
-      // once you're out, you're out, same as how a Tag round already treats you (see
-      // "Tagged! Watch for the next round.").
-      return currentRoom.players
-        .filter((p) => p.name !== name && !p.eliminated && livePositions[p.name])
-        .map((p) => {
-          const live = livePositions[p.name]
-          const point = map.project([live.lng, live.lat])
-          return {
-            name: p.name,
-            color: p.color,
-            avatarId: p.avatarId,
-            nextTurn: live.nextTurn,
-            // Survival-only - lets you gauge a nearby player/bot's threat level at a glance
-            // without opening the roster panel.
-            health: currentRoom.mode === 'survival' ? Math.round(live.health ?? p.health ?? 1000) : null,
-            screenX: (point.x / width) * 100,
-            screenY: (point.y / height) * 100
-          }
-        })
-    } catch {
-      return []
-    }
+  const screenPlayers = useMemo(
+    () => computeScreenPlayers(currentRoom, name, livePositions, mapRef.current),
     // mapViewTick has no value of its own - it exists purely to re-run this on every map
     // move/zoom/pan, not just when the underlying room/player data changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentRoom, name, livePositions, mapViewTick])
+    [currentRoom, name, livePositions, mapViewTick]
+  )
 
   // Survival's old "touch a cloud = instant out" collision check lived here; it's replaced by the
   // continuous health damage/regen loop in the movement tick effect below, which also drives the
@@ -3055,30 +3158,26 @@ export default function App({ playerName, renameName, joinRequest }) {
 
   // Finder (Easy) only - item markers on the map, same project-to-% recipe as screenPlayers above.
   // Hard mode simply never computes this, which is the entire easy/hard visibility difference.
-  const screenItems = useMemo(() => {
-    if (!showsItemIcons(currentRoom?.mode) || !mapRef.current) return []
-    try {
-      const map = mapRef.current
-      const container = map.getContainer()
-      const width = container.clientWidth
-      const height = container.clientHeight
-      const foundIds = currentPlayer?.foundItems || []
-      return (currentRoom.items || [])
-        .filter((item) => !foundIds.includes(item.id))
-        .map((item) => {
-          // Roaming items' real position is wherever they've actually walked to (broadcast) - the
-          // stored lat/lng is just the round-start spawn, stale the instant a roaming item moves.
-          const live = liveItemPositions[item.id]
-          const lat = live?.lat ?? item.lat
-          const lng = live?.lng ?? item.lng
-          const point = map.project([lng, lat])
-          return { id: item.id, iconId: item.iconId, label: item.label, screenX: (point.x / width) * 100, screenY: (point.y / height) * 100 }
-        })
-    } catch {
-      return []
-    }
+  const screenItems = useMemo(
+    () => computeScreenItems(currentRoom, currentPlayer?.foundItems || [], liveItemPositions, mapRef.current),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentRoom, currentPlayer, liveItemPositions, mapViewTick])
+    [currentRoom, currentPlayer, liveItemPositions, mapViewTick]
+  )
+
+  // Spectate's read-only equivalents - same shared projection math, just fed spectatingRoom
+  // instead of currentRoom. There's no "self" to exclude (a spectator's own name never matches a
+  // real player), so every real player renders, and no foundItems concept either (nothing to
+  // exclude from screenItems - a spectator doesn't "have" found items).
+  const spectateScreenPlayers = useMemo(
+    () => computeScreenPlayers(spectatingRoom, name, livePositions, mapRef.current),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [spectatingRoom, name, livePositions, mapViewTick]
+  )
+  const spectateScreenItems = useMemo(
+    () => computeScreenItems(spectatingRoom, [], liveItemPositions, mapRef.current),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [spectatingRoom, liveItemPositions, mapViewTick]
+  )
 
   // Off-screen "radar" indicators - Finder (Easy) items not currently on-screen, and in Tag
   // whichever direction actually matters for the player driving right now: It sees every other
@@ -3242,6 +3341,56 @@ export default function App({ playerName, renameName, joinRequest }) {
       perfectCount: perfectCount > 5 ? perfectCount : null
     }
   }, [currentRoom, sortedRosterPlayers, name, health, livePositions])
+
+  // Spectate's read-only stat summaries - small and dedicated rather than threading a "no self"
+  // branch through sortedRosterPlayers/survivalRosterView above, since there genuinely is no self
+  // (no health/foundItems of one's own) to fold in for a spectator.
+  const spectateSortedRosterPlayers = useMemo(() => {
+    const room = spectatingRoom
+    if (!room?.players?.length) return room?.players || []
+    const rankable = room.mode === 'survival' || isFinderMode(room.mode)
+    if (!rankable) return room.players
+    const scoreFor = (p) => (room.mode === 'survival' ? livePositions[p.name]?.health ?? p.health ?? 1000 : livePositions[p.name]?.foundCount ?? 0)
+    return [...room.players].sort((a, b) => {
+      if (room.mode === 'survival') {
+        if (Boolean(a.eliminated) !== Boolean(b.eliminated)) return a.eliminated ? 1 : -1
+        if (a.eliminated && b.eliminated) return (b.eliminatedAt ?? 0) - (a.eliminatedAt ?? 0)
+      }
+      return scoreFor(b) - scoreFor(a)
+    })
+  }, [spectatingRoom, livePositions])
+
+  const spectateSurvivalRosterView = useMemo(() => {
+    const room = spectatingRoom
+    if (room?.mode !== 'survival') return null
+    const ranked = spectateSortedRosterPlayers.map((player, i) => ({ player, rank: i + 1 }))
+    const scoreFor = (p) => livePositions[p.name]?.health ?? p.health ?? 1000
+    const perfectCount = ranked.filter((r) => scoreFor(r.player) >= 1000).length
+    return {
+      top5: ranked.slice(0, 5),
+      survivors: ranked.filter((r) => !r.player.eliminated).length,
+      total: ranked.length,
+      perfectCount: perfectCount > 5 ? perfectCount : null
+    }
+  }, [spectatingRoom, spectateSortedRosterPlayers, livePositions])
+
+  const spectateFinderSummary = useMemo(() => {
+    if (!isFinderMode(spectatingRoom?.mode)) return null
+    const items = spectatingRoom.items || []
+    return { foundCount: items.filter((i) => i.foundBy).length, total: items.length }
+  }, [spectatingRoom])
+
+  const spectateTagStatus = useMemo(() => {
+    if (spectatingRoom?.mode !== 'tag') return null
+    const players = spectatingRoom.players || []
+    const realPlayers = players.filter((p) => !p.isNpc)
+    return {
+      itName: spectatingRoom.itName,
+      survivors: realPlayers.filter((p) => p.name !== spectatingRoom.itName && !p.eliminated).length,
+      total: realPlayers.length
+    }
+  }, [spectatingRoom])
+
   const openLeaderboard = () => {
     setLeaderboardOpen(true)
     if (!isSupabaseConfigured) {
@@ -3265,26 +3414,30 @@ export default function App({ playerName, renameName, joinRequest }) {
         setLeaderboardRows(data || [])
       })
   }
-  const renderPlayerRow = (player, rank) => {
+  // `room` defaults to currentRoom so every existing call site (normal play) is unaffected -
+  // spectate's read-only roster passes spectatingRoom instead. isSelf is always false there (a
+  // spectator's own name never matches a real player), which correctly falls through to each
+  // mode's non-self display (live broadcast health/foundCount) with no further branching needed.
+  const renderPlayerRow = (player, rank, room = currentRoom) => {
     const isSelf = player.name === name
     const live = livePositions[player.name]
     return (
       <div key={player.name} className={`room-player-item${isSelf ? ' room-player-self' : ''}`}>
         <span className="room-player-identity" style={{ color: player.color }}>
           {rank ? <span className="room-player-rank">{String(rank).padStart(2, '0')}.</span> : null}
-          {player.name === currentRoom.host ? <span className="host-badge" title="Host - can add/remove NPCs">👑</span> : null}
+          {player.name === room.host ? <span className="host-badge" title="Host - can add/remove NPCs">👑</span> : null}
           <span className="room-player-avatar" dangerouslySetInnerHTML={{ __html: getAvatarSvg(player.avatarId) }} />
           {player.name}
           {player.isNpc ? ' (Bot)' : ''}
-          {currentRoom.itName === player.name ? ' (It)' : ''}
+          {room.itName === player.name ? ' (It)' : ''}
         </span>
         <span className="room-player-actions">
-          {currentRoom.mode === 'survival' ? (
+          {room.mode === 'survival' ? (
             <span className="player-status active">{Math.round(isSelf ? health : live?.health ?? player.health ?? 1000)} HP</span>
-          ) : isFinderMode(currentRoom.mode) ? (
-            <span className="player-status active">{isSelf ? (player.foundItems || []).length : live?.foundCount ?? 0}/{(currentRoom.items || []).length}</span>
+          ) : isFinderMode(room.mode) ? (
+            <span className="player-status active">{isSelf ? (player.foundItems || []).length : live?.foundCount ?? 0}/{(room.items || []).length}</span>
           ) : player.eliminated ? (
-            <span className="player-status">{currentRoom.mode === 'tag' ? 'Caught' : 'Eliminated'}</span>
+            <span className="player-status">{room.mode === 'tag' ? 'Caught' : 'Eliminated'}</span>
           ) : (
             <span className="player-status active">Alive</span>
           )}
@@ -3399,6 +3552,58 @@ export default function App({ playerName, renameName, joinRequest }) {
     </>
   ) : null
 
+  // Read-only counterpart to roomStatusPanels above - deliberately not built by threading more
+  // conditionals through that one, since almost every branch there is a host-only action (Start/
+  // Stop, Add NPC, the It-picker). No action buttons at all here, just whatever a real player in
+  // that room would see about how the round is going.
+  const spectateStatusPanel = spectatingRoom ? (
+    <>
+      <div className="room-meta">
+        <div className="room-meta-row">
+          <span>Watching <strong>{spectatingRoom.code}</strong> · {MODE_CONFIG[spectatingRoom.mode]?.label || spectatingRoom.mode}</span>
+        </div>
+        <div className="room-meta-sub">
+          Host {spectatingRoom.host || 'Host'} · {spectatingRoom.players.length}/{spectatingRoom.maxPlayers} · {spectatingRoom.status}
+        </div>
+      </div>
+      {spectatingRoom.status === 'finished' ? (
+        <div className="room-finished">
+          <div className="room-finished-title">
+            {spectatingRoom.winners?.length ? `${spectatingRoom.winners.join(' & ')} won!` : 'Round finished'}
+          </div>
+        </div>
+      ) : null}
+      {spectatingRoom.mode === 'tag' && spectateTagStatus ? (
+        <div className="room-meta">
+          <div className="room-meta-sub">
+            {spectateTagStatus.itName ? `${spectateTagStatus.itName} is It · ` : ''}{spectateTagStatus.survivors}/{spectateTagStatus.total} still running
+          </div>
+        </div>
+      ) : null}
+      <div className="room-player-list">
+        <div className="room-player-title">Players</div>
+        {spectatingRoom.mode === 'survival' && spectateSurvivalRosterView ? (
+          <>
+            <div className="survivor-count">
+              {spectateSurvivalRosterView.survivors}/{spectateSurvivalRosterView.total} survivors
+            </div>
+            {spectateSurvivalRosterView.top5.map(({ player, rank }) => renderPlayerRow(player, rank, spectatingRoom))}
+            {spectateSurvivalRosterView.perfectCount ? (
+              <div className="perfect-score-divider">Perfect scores ({spectateSurvivalRosterView.perfectCount})</div>
+            ) : null}
+          </>
+        ) : (
+          spectateSortedRosterPlayers.map((player) => renderPlayerRow(player, null, spectatingRoom))
+        )}
+      </div>
+      {isFinderMode(spectatingRoom.mode) && spectateFinderSummary ? (
+        <div className="item-tracker">
+          <div className="room-player-title">Items ({spectateFinderSummary.foundCount}/{spectateFinderSummary.total})</div>
+        </div>
+      ) : null}
+    </>
+  ) : null
+
   return (
     <div className="app-shell">
       <div className="app-sidebar">
@@ -3432,7 +3637,7 @@ export default function App({ playerName, renameName, joinRequest }) {
             </div>
           </div>
         ) : null}
-        {!started && !pickingSpawn ? (
+        {!started && !pickingSpawn && !spectating ? (
           <div className="setup-modal-backdrop">
             <div className="setup-modal-card">
               <div className="mode-select">
@@ -3660,6 +3865,24 @@ export default function App({ playerName, renameName, joinRequest }) {
             </div>
           </>
         ) : null}
+        {spectating ? (
+          <>
+            {/* Same responsive drawer treatment as the real driving sidebar above, just with the
+                read-only spectateStatusPanel instead - no settings/controls to show since a
+                spectator isn't driving anything. */}
+            <button
+              className="mobile-menu-toggle"
+              onClick={() => setMobileMenuOpen((v) => !v)}
+              title={mobileMenuOpen ? 'Close menu' : 'Open menu'}
+            >
+              {mobileMenuOpen ? '✕' : '☰'}
+            </button>
+            {mobileMenuOpen ? <div className="mobile-drawer-backdrop" onClick={() => setMobileMenuOpen(false)} /> : null}
+            <div className={`mobile-drawer${mobileMenuOpen ? ' open' : ''}`}>
+              {spectateStatusPanel}
+            </div>
+          </>
+        ) : null}
         {started ? roundReportPanel : null}
       </div>
       <div className="map-panel">
@@ -3683,9 +3906,20 @@ export default function App({ playerName, renameName, joinRequest }) {
         <div className="overlay-top-right">
           <button className="cloud-button" onClick={zoomIn}>+</button>
           <button className="cloud-button" onClick={zoomOut}>−</button>
-          <button className="leave-room" onClick={quitGame}>Quit</button>
+          <button className="leave-room" onClick={spectating ? leaveSpectate : quitGame}>{spectating ? '✕' : 'Quit'}</button>
         </div>
-        <ScreenOverlay wind={displayWind} players={screenPlayers} items={screenItems} radarTargets={radarTargets} started={started} name={name} speedKmh={displayedSpeed} turboActive={turboActive} compassRef={compassRef} gameMessage={gameMessage} />
+        <ScreenOverlay
+          wind={displayWind}
+          players={spectating ? spectateScreenPlayers : screenPlayers}
+          items={spectating ? spectateScreenItems : screenItems}
+          radarTargets={spectating ? [] : radarTargets}
+          started={started}
+          name={name}
+          speedKmh={displayedSpeed}
+          turboActive={turboActive}
+          compassRef={compassRef}
+          gameMessage={gameMessage}
+        />
         {started ? <TouchControls onControl={setTouchControl} /> : null}
       </div>
     </div>

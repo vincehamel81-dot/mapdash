@@ -6,14 +6,19 @@ import ChatPanel from './ChatPanel'
 import './index.css'
 
 // App and ChatPanel are otherwise-independent siblings - this tiny bit of lifted state is just a
-// command channel so ChatPanel's "Join" button can ask App to join a room, without either
-// component needing to know anything else about the other.
+// command channel so ChatPanel's "Join"/"Spectate" buttons can ask App to join or spectate a room,
+// without either component needing to know anything else about the other.
 function Root({ name, renameName }) {
   const [joinRequest, setJoinRequest] = useState(null)
+  const [spectateRequest, setSpectateRequest] = useState(null)
   return (
     <>
-      <App playerName={name} renameName={renameName} joinRequest={joinRequest} />
-      <ChatPanel myName={name} onRequestJoin={(code) => setJoinRequest({ code, ts: Date.now() })} />
+      <App playerName={name} renameName={renameName} joinRequest={joinRequest} spectateRequest={spectateRequest} />
+      <ChatPanel
+        myName={name}
+        onRequestJoin={(code) => setJoinRequest({ code, ts: Date.now() })}
+        onRequestSpectate={(code) => setSpectateRequest({ code, ts: Date.now() })}
+      />
     </>
   )
 }
