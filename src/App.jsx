@@ -1031,7 +1031,18 @@ export default function App({ playerName, renameName, joinRequest }) {
         // Bumped up alongside the point-density rework below - a live screenshot of the previous
         // tuning still showed a wide halo of individually-visible dots rather than a fused mass.
         'heatmap-intensity': 1.4,
-        'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 11, 34, 14, 62, 17, 105],
+        // heatmap-radius is in screen PIXELS, but the point scatter's spacing is fixed in real
+        // meters - zooming in 6 levels (say 11 to 17) makes any two fixed-position points ~64x
+        // farther apart on screen, since each zoom level roughly doubles pixels-per-meter. The
+        // previous version only scaled radius ~3x across that same range, so it looked properly
+        // dense zoomed out (confirmed via screenshot) but fell apart into visible individual dots
+        // once zoomed in - the blur kernels simply stopped reaching each other. Doubling per zoom
+        // level (literal stops, not the 'exponential' interpolation type, for a predictable curve)
+        // keeps points overlapping by roughly the same margin at any zoom.
+        'heatmap-radius': [
+          'interpolate', ['linear'], ['zoom'],
+          11, 22, 12, 43, 13, 86, 14, 172, 15, 344, 16, 688, 17, 1376, 18, 2752
+        ],
         'heatmap-opacity': 0.85,
         // Threshold raised before any color shows (0 stays transparent past 0.15 density, not just
         // past 0) so the sparse, spread-out satellite points don't show up as a stippled/speckled
