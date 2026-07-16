@@ -737,6 +737,41 @@
   font-weight: 700;
 }
 
+.spectator-pill-wrap {
+  position: relative;
+  /* .screen-overlay (the ancestor for every HUD element) is pointer-events:none by default so it
+     doesn't block map dragging/clicking underneath - this is the one HUD element that needs to
+     actually be clickable, so it opts back in explicitly. */
+  pointer-events: auto;
+}
+
+.spectator-pill {
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.spectator-list {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  padding: 6px 0;
+  min-width: 140px;
+  max-height: 160px;
+  overflow-y: auto;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
+  z-index: 601;
+}
+
+.spectator-list-item {
+  padding: 6px 14px;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
 .compass-pill {
   width: 38px;
   height: 38px;

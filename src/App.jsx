@@ -903,7 +903,8 @@ function TouchControls({ onControl }) {
   )
 }
 
-function ScreenOverlay({ wind, players = [], items = [], radarTargets = [], started, name, speedKmh, turboActive, compassRef, gameMessage }) {
+function ScreenOverlay({ wind, players = [], items = [], radarTargets = [], started, name, speedKmh, turboActive, compassRef, gameMessage, spectatorNames = [] }) {
+  const [spectatorListOpen, setSpectatorListOpen] = useState(false)
   return (
     <div className="screen-overlay">
       {started && gameMessage ? <div className="overlay-top-title">{gameMessage}</div> : null}
@@ -924,6 +925,18 @@ function ScreenOverlay({ wind, players = [], items = [], radarTargets = [], star
       {started ? (
         <div className="overlay-bottom-left">
           <div className={`mode-pill${turboActive ? ' turbo-active' : ''}`}>{speedKmh} km/h{turboActive ? ' ⚡ Turbo' : ''}</div>
+          {spectatorNames.length ? (
+            <div className="spectator-pill-wrap">
+              <button className="mode-pill spectator-pill" onClick={() => setSpectatorListOpen((o) => !o)}>
+                👁 {spectatorNames.length}
+              </button>
+              {spectatorListOpen ? (
+                <div className="spectator-list">
+                  {spectatorNames.map((n) => <div key={n} className="spectator-list-item">{n}</div>)}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       ) : null}
       {players.map((p) => (
@@ -1002,6 +1015,9 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
   // spectator is never a player in the room (no seat taken, no broadcasted position of their own),
   // just watching. Mutually exclusive with joinedRoomCode in practice (see spectateRoom/joinRoom).
   const [spectateRoomCode, setSpectateRoomCode] = useState(null)
+  // Who's currently watching THIS room, via the same room:${code} channel's Realtime Presence -
+  // populated for a real player's client (a spectator has no use for watching their own audience).
+  const [spectatorNames, setSpectatorNames] = useState([])
   const [eliminated, setEliminated] = useState(false)
   const [gameMessage, setGameMessage] = useState('')
   const [mapReady, setMapReady] = useState(false)
@@ -1339,6 +1355,7 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
     setClouds([])
     setMegaCloud(null)
     setEliminated(false)
+    setSpectatorNames([])
     // Spectating subscribes to the exact same per-room broadcast channel a real player's client
     // would - it's the only source of live position/health/item movement (never the database, see
     // above), so watching a room without it would show a static, un-moving roster. joinedRoomCode
@@ -1348,7 +1365,19 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
       roomChannelRef.current = null
       return
     }
-    const channel = supabase.channel(`room:${watchedRoomCode}`)
+    const channel = supabase.channel(`room:${watchedRoomCode}`, { config: { presence: { key: name } } })
+    // Who's watching, for a real player's own client - Realtime Presence on this same channel
+    // rather than a new table/broadcast event, since presence is exactly "who's currently
+    // connected here" with automatic cleanup on disconnect, no explicit untrack/DB write needed.
+    // A spectator's own client doesn't care who else is watching, so this just stays empty there.
+    channel.on('presence', { event: 'sync' }, () => {
+      const state = channel.presenceState()
+      const spectators = Object.values(state)
+        .flat()
+        .filter((p) => p.type === 'spectator')
+        .map((p) => p.name)
+      setSpectatorNames([...new Set(spectators)])
+    })
     // A real player's own position - one broadcast per player, never batched (nothing to batch,
     // there's only ever one).
     channel.on('broadcast', { event: 'position' }, ({ payload }) => {
@@ -1382,7 +1411,13 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
         return next
       })
     })
-    channel.subscribe()
+    channel.subscribe((status) => {
+      // Only a spectator announces themselves via presence - a real player is already visible via
+      // the room roster itself, no need to double up.
+      if (status === 'SUBSCRIBED' && spectateRoomCode) {
+        channel.track({ name, type: 'spectator' })
+      }
+    })
     roomChannelRef.current = channel
     return () => {
       supabase.removeChannel(channel)
@@ -3931,6 +3966,7 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
           turboActive={turboActive}
           compassRef={compassRef}
           gameMessage={gameMessage}
+          spectatorNames={spectating ? [] : spectatorNames}
         />
         {started ? <TouchControls onControl={setTouchControl} /> : null}
       </div>
