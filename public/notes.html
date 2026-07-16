@@ -35,6 +35,16 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.7.0 (2026-07-15)</h2>
+<ul>
+  <li>Fixed a real bug: HP and cloud count shown in the roster were leftover from your *previous* round, not reset until a new round actually started - a brand new "waiting" room could show 418 HP and 213 clouds active before anyone had even pressed Start</li>
+  <li>Tag: Turbo now works for both It and regular players (previously silently disabled in Tag on purpose, but that read as broken rather than intentional - now stacks with It's speed bonus)</li>
+  <li>Tag: host can now pick who starts as It before starting the round, instead of it always being random</li>
+  <li>Finder (Hard) now spawns 5 items instead of 10 - finding 10 with no map assistance was very hard/long</li>
+  <li>Chat: fixed a real layout bug where a message with no spaces (e.g. one long repeated character) could push the online/friends sidebar off-screen instead of wrapping</li>
+  <li>Start point now also syncs via Supabase (not just localStorage), so it follows you across devices instead of resetting every time you switch</li>
+</ul>
+
 <h2>Version 1.6.0 (2026-07-15)</h2>
 <ul>
   <li>Mobile support, phase 1: the sidebar (roster/chat/settings) is now a slide-out drawer below a phone-width breakpoint instead of a fixed 320px column blocking the map</li>

@@ -205,20 +205,26 @@ function randomCloudTier() {
 
 // Builds the per-player fields a fresh round needs for the given mode; called at both room
 // creation and every restart so a re-run round always starts from a clean slate.
-function resetPlayersForRound(players, mode) {
+function resetPlayersForRound(players, mode, preferredItName) {
   let itName = null
   const next = players.map((p) => ({ ...p, eliminated: false, eliminatedAt: null }))
   if (mode === 'survival') {
-    return { players: next.map((p) => ({ ...p, health: 1000 })), itName }
+    // survivalRank/survivalScore are only meaningful for the round that just finished - carrying
+    // them into a fresh round (defensive: rooms can't currently be restarted, so this shouldn't be
+    // reachable today, but stale rank/score display data is wrong regardless of how it happens).
+    return { players: next.map((p) => ({ ...p, health: 1000, survivalRank: null, survivalScore: null })), itName }
   }
   if (isFinderMode(mode)) {
     return { players: next.map((p) => ({ ...p, foundItems: [] })), itName }
   }
   if (mode === 'tag') {
     // NPCs are ambient-only (v1) - they can't chase or be caught, so picking one as It would
-    // leave the round with no way to win. Only real players are eligible.
+    // leave the round with no way to win. Only real players are eligible. Host can choose who's
+    // It (see the lobby's It selector) - falls back to random if nothing was picked, or if the
+    // pick doesn't match anyone actually in the room anymore (e.g. they left before Start).
     const eligible = next.filter((p) => !p.isNpc)
-    itName = eligible[Math.floor(Math.random() * eligible.length)]?.name ?? null
+    const preferred = preferredItName ? eligible.find((p) => p.name === preferredItName) : null
+    itName = preferred?.name ?? eligible[Math.floor(Math.random() * eligible.length)]?.name ?? null
     return { players: next.map((p) => ({ ...p, isIt: p.name === itName })), itName }
   }
   return { players: next, itName }
@@ -765,6 +771,9 @@ function ScreenOverlay({ wind, players = [], items = [], radarTargets = [], star
 
 export default function App({ playerName, renameName, joinRequest }) {
   const [mode, setMode] = useState('single')
+  // Host's choice of who's It for the next Tag round - '' means "no preference, pick randomly"
+  // (see resetPlayersForRound's tag branch). Lobby-only UI, host-only.
+  const [preferredItName, setPreferredItName] = useState('')
   const [started, setStarted] = useState(false)
   const [zoom, setZoom] = useState(CONFIG.defaultZoom)
   const [position, setPosition] = useState(defaultPosition)
@@ -1054,6 +1063,16 @@ export default function App({ playerName, renameName, joinRequest }) {
   useEffect(() => {
     setLivePositions({})
     setLiveItemPositions({})
+    // health/clouds previously only reset when a Survival round actually STARTED
+    // (roundStartedAt), not when joinedRoomCode itself changed - quitting a round with, say, 418
+    // HP and 213 leftover clouds, then creating or joining a brand new room, showed that exact
+    // stale HP/cloud-count in the roster before the new room had even started. This is the
+    // established reset point for "stuff tied to the room you're currently in", same as
+    // livePositions/liveItemPositions above.
+    setHealth(1000)
+    healthRef.current = 1000
+    setClouds([])
+    setEliminated(false)
     if (!isSupabaseConfigured || !joinedRoomCode) {
       roomChannelRef.current = null
       return
@@ -1125,12 +1144,15 @@ export default function App({ playerName, renameName, joinRequest }) {
       if (currentRoom.status === 'waiting') {
         setGameMessage('Waiting for another player to join...')
       } else {
+        // Item count reads from the room's actual spawned set (currentRoom.items.length), not a
+        // hardcoded number - Hard spawns fewer than Easy/Roaming (see buildRoundState's itemCount).
+        const count = currentRoom.items?.length ?? 10
         setGameMessage(
           currentRoom.mode === 'finder-easy'
-            ? 'Find all 10 items - watch for their icons on the map!'
+            ? `Find all ${count} items - watch for their icons on the map!`
             : currentRoom.mode === 'finder-roaming'
-            ? 'Find all 10 items - they move, so watch for their icons on the map!'
-            : 'Find all 10 items - only the distance list can help you.'
+            ? `Find all ${count} items - they move, so watch for their icons on the map!`
+            : `Find all ${count} items - only the distance list can help you.`
         )
       }
       return
@@ -1208,17 +1230,21 @@ export default function App({ playerName, renameName, joinRequest }) {
     // Doubled from the street's raw value across the board - a 50 km/h street plays at 100
     // normal, 200 under Turbo. S/ArrowDown is an instant facing-flip now (see the tick loop),
     // not a held reverse gear, so there's no separate reverse speed tier anymore.
-    const base = (movementKeyHeld ? currentSegment?.speedKmh ?? 50 : 0) * 2
+    let speed = (movementKeyHeld ? currentSegment?.speedKmh ?? 50 : 0) * 2
     // Tag's "It" drives 2x everyone else's speed.
     const isIt = currentRoom?.mode === 'tag' && currentRoom.itName === name
-    if (isIt) return base * 2
-    // Turbo (hold Shift or the on-screen button): unlimited use, doubles speed in every mode
-    // except Tag - It's 2x above is the only speed buff Tag allows.
-    const turboActive = (controls.turbo || turboButtonOn) && currentRoom?.mode !== 'tag'
-    return turboActive ? base * 2 : base
+    if (isIt) speed *= 2
+    // Turbo (hold Shift or the on-screen button): unlimited use, doubles speed in every mode,
+    // Tag included - stacks with It's 2x above rather than being blocked there. Previously
+    // disabled in Tag on purpose ("It's 2x is the only speed buff Tag allows"), but that read as
+    // silently broken rather than intentional, and direct feedback was to just open it up instead
+    // of surfacing the restriction better.
+    const turboActive = controls.turbo || turboButtonOn
+    if (turboActive) speed *= 2
+    return speed
   }, [controls, movementKeyHeld, currentSegment, currentRoom, name, turboButtonOn])
 
-  const turboActive = (controls.turbo || turboButtonOn) && movementKeyHeld && currentRoom?.mode !== 'tag'
+  const turboActive = (controls.turbo || turboButtonOn) && movementKeyHeld
 
   // Throttled to ~8Hz so cross-device position sync stays well within the realtime message
   // budget - this never touches Supabase's database, only the ephemeral broadcast channel.
@@ -1452,6 +1478,50 @@ export default function App({ playerName, renameName, joinRequest }) {
       else localStorage.removeItem('mapdashrun_pickedSpawn')
     } catch {}
   }, [pickedSpawn])
+
+  // Cross-device: localStorage above is instant but device-local, which looked like the start
+  // point "always resets to default" the moment you switched devices (e.g. testing on mobile
+  // after setting it on desktop). Supabase is the actual source of truth once it loads - this
+  // fetch runs once per name and overrides whatever localStorage had, if a row exists.
+  // spawnPrefsLoadedRef gates the write effect below until this resolves - on a brand-new device
+  // pickedSpawn starts null (no local entry), and without the gate the write effect would fire
+  // immediately on mount with that null, racing this fetch and potentially overwriting a real
+  // saved preference from another device with nothing.
+  const spawnPrefsLoadedRef = useRef(false)
+  useEffect(() => {
+    spawnPrefsLoadedRef.current = false
+    if (!isSupabaseConfigured || !name) {
+      spawnPrefsLoadedRef.current = true
+      return
+    }
+    supabase
+      .from('player_prefs')
+      .select('spawn_lat, spawn_lng')
+      .eq('name_lower', name.toLowerCase())
+      .maybeSingle()
+      .then(({ data, error }) => {
+        if (error) console.error('[player_prefs] fetch failed:', error.message)
+        else if (data?.spawn_lat != null && data?.spawn_lng != null) {
+          setPickedSpawn({ lat: data.spawn_lat, lng: data.spawn_lng })
+        }
+        spawnPrefsLoadedRef.current = true
+      })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name])
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !name || !spawnPrefsLoadedRef.current) return
+    supabase
+      .from('player_prefs')
+      .upsert({
+        name_lower: name.toLowerCase(),
+        display_name: name,
+        spawn_lat: pickedSpawn?.lat ?? null,
+        spawn_lng: pickedSpawn?.lng ?? null,
+        updated_at: new Date().toISOString()
+      })
+      .then(({ error }) => { if (error) console.error('[player_prefs] save failed:', error.message) })
+  }, [pickedSpawn, name])
 
   useEffect(() => {
     if (animationRef.current) cancelAnimationFrame(animationRef.current)
@@ -2036,16 +2106,19 @@ export default function App({ playerName, renameName, joinRequest }) {
   // startRoom, keyed off MODE_CONFIG so it generalizes to whichever mode the room is running
   // instead of special-casing survival.
   const buildRoundState = useCallback(
-    (players, roomMode) => {
-      const { players: nextPlayers, itName } = resetPlayersForRound(players, roomMode)
+    (players, roomMode, preferredItName) => {
+      const { players: nextPlayers, itName } = resetPlayersForRound(players, roomMode, preferredItName)
       const isFinder = isFinderMode(roomMode)
       // Uniform across the whole playable bbox (not anchored to any one player's spawn) - a room
       // has multiple players starting at different points, so biasing toward a single anchor
       // unfairly favored whoever's position happened to trigger the round build. Bun-bun is the
       // one exception even here: it hides near a random corner of the play area for the whole
       // round (see ITEM_BEHAVIORS) and never moves once placed, unlike every other roaming item.
+      // Hard has no map icons at all (distance list only), so finding 10 was "very hard/long" per
+      // direct feedback - 5 keeps the same no-visual-aid difficulty without the length.
+      const itemCount = roomMode === 'finder-hard' ? 5 : 10
       const items = isFinder && graph
-        ? pickRoundFinderItems(10).map((def, i) => {
+        ? pickRoundFinderItems(itemCount).map((def, i) => {
             const behavior = ITEM_BEHAVIORS[def.id]
             let pt = null
             if (behavior?.type === 'hidden-corner') {
@@ -2214,7 +2287,7 @@ export default function App({ playerName, renameName, joinRequest }) {
       basePlayers = [...basePlayers, ...filled]
     }
     const enoughPlayers = basePlayers.length >= cfg.minPlayers
-    const roundExtras = enoughPlayers ? buildRoundState(basePlayers, currentRoom.mode) : null
+    const roundExtras = enoughPlayers ? buildRoundState(basePlayers, currentRoom.mode, preferredItName) : null
     const nextRoom = {
       ...currentRoom,
       status: enoughPlayers ? 'playing' : 'waiting',
@@ -2228,7 +2301,7 @@ export default function App({ playerName, renameName, joinRequest }) {
     updateRoom(currentRoom.code, () => nextRoom)
     setEliminated(false)
     setStarted(nextRoom.status === 'playing')
-  }, [currentRoom, isRoomHost, updateRoom, buildRoundState])
+  }, [currentRoom, isRoomHost, updateRoom, buildRoundState, preferredItName])
 
   const stopRoom = useCallback(() => {
     if (!currentRoom || !isRoomHost) return
@@ -3026,6 +3099,19 @@ export default function App({ playerName, renameName, joinRequest }) {
           Host {currentRoom.host || 'Host'} · {currentRoom.players.length}/{currentRoom.maxPlayers}{roundRemainingLabel ? ` · ${roundRemainingLabel}` : ''}
         </div>
       </div>
+      {isRoomHost && currentRoom.mode === 'tag' && currentRoom.status !== 'playing' ? (
+        <div className="room-meta">
+          <label className="center-toggle">
+            It:{' '}
+            <select value={preferredItName} onChange={(e) => setPreferredItName(e.target.value)}>
+              <option value="">Random</option>
+              {currentRoom.players.filter((p) => !p.isNpc).map((p) => (
+                <option key={p.name} value={p.name}>{p.name}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+      ) : null}
       <div className="room-player-list">
         <div className="room-player-title">
           Players
