@@ -737,6 +737,12 @@
   font-weight: 700;
 }
 
+.speed-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .spectator-pill-wrap {
   position: relative;
   /* .screen-overlay (the ancestor for every HUD element) is pointer-events:none by default so it

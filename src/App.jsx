@@ -924,20 +924,23 @@ function ScreenOverlay({ wind, players = [], items = [], radarTargets = [], star
       </div>
       {started ? (
         <div className="overlay-bottom-left">
-          <div className={`mode-pill${turboActive ? ' turbo-active' : ''}`}>{speedKmh} km/h{turboActive ? ' ⚡ Turbo' : ''}</div>
-          {spectatorNames.length ? (
-            <div className="spectator-pill-wrap">
-              <button className="mode-pill spectator-pill" onClick={() => setSpectatorListOpen((o) => !o)}>
-                👁 {spectatorNames.length}
-              </button>
-              {spectatorListOpen ? (
-                <div className="spectator-list">
-                  {spectatorNames.map((n) => <div key={n} className="spectator-list-item">{n}</div>)}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
+          <div className="speed-row">
+            <div className={`mode-pill${turboActive ? ' turbo-active' : ''}`}>{speedKmh} km/h{turboActive ? ' ⚡ Turbo' : ''}</div>
+            {spectatorNames.length ? (
+              <div className="spectator-pill-wrap">
+                <button className="mode-pill spectator-pill" onClick={() => setSpectatorListOpen((o) => !o)}>
+                  👁 {spectatorNames.length}
+                </button>
+                {spectatorListOpen ? (
+                  <div className="spectator-list">
+                    {spectatorNames.map((n) => <div key={n} className="spectator-list-item">{n}</div>)}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
         </div>
+      ) : null}
       ) : null}
       {players.map((p) => (
         <div key={p.name} className="player-dot" style={{ left: `${p.screenX}%`, top: `${p.screenY}%`, color: p.color }}>
