@@ -35,6 +35,11 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.9.1 (2026-07-16)</h2>
+<ul>
+  <li>Fixed a real bug in Spectate mode: your own name/icon marker was never actually hidden while spectating, so you'd see yourself sitting at your last driving position, and pressing arrow keys would show turn-signal arrows attached to nothing. The whole marker is now hidden while spectating - real players correctly never saw it in the first place, since spectating never broadcasts a position</li>
+</ul>
+
 <h2>Version 1.9.0 (2026-07-16)</h2>
 <ul>
   <li>New: <strong>Spectate</strong>. From Chat, a friend (or anyone Online) who's mid-round now shows a "Spectate" button instead of "Join" - watch their game with a free pan/zoom camera and a read-only sidebar (players remaining, health/items found, who's It, etc.), no seat taken in their room. An "✕" button top-right returns to the lobby. Non-round modes like Team still show "Join" as before</li>

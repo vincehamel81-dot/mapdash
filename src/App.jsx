@@ -2152,6 +2152,18 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
     carMarkerElRef.current.innerHTML = carMarkerMarkup(selectedAvatarId, selectedColor, name, nextTurnSignal)
   }, [selectedAvatarId, selectedColor, name, nextTurnSignal])
 
+  // The car marker (own name/icon/turn-signal) is created once and persists for the whole session
+  // regardless of started/spectating - it was never actually hidden while spectating, which is
+  // exactly why a spectator could see their own name+icon sitting at their last driving position,
+  // and why pressing left/right (still updating nextTurnSignal via the keyboard listener, even
+  // though the movement loop itself is already skipped for spectating) showed turn-signal arrows
+  // with no car to attach them to. A spectator has no real presence in the room being watched at
+  // all - hide the whole marker rather than trying to special-case its contents.
+  useEffect(() => {
+    if (!carMarkerElRef.current) return
+    carMarkerElRef.current.style.display = spectating ? 'none' : ''
+  }, [spectating])
+
   // A temporary marker preview while choosing a custom start point before driving begins.
   useEffect(() => {
     const map = mapRef.current
