@@ -35,6 +35,15 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.8.1 (2026-07-16)</h2>
+<ul>
+  <li>Cloud mode is now solo (like Single) instead of a multiplayer room - no room code to create or join, just pick Cloud and drive. Simpler and avoids the room-sync machinery entirely for a mode that was never meant to be competitive</li>
+  <li>Cloud mode now shares Single/Team's full wide play area (Lévis and the other outer towns included), not the tighter Survival/Tag/Finder box</li>
+  <li>Added two bigger Size options, XL and XXL, for clouds that dwarf the map</li>
+  <li>Fixed a real bug: picking a Direction and then pressing a driving key (especially "S", also a direction option) could silently change the Direction back - the dropdown kept keyboard focus after a click, so the very next key press was captured by the dropdown instead of the car</li>
+  <li>Cloud shape rebalanced: one clearly dominant core with a couple of smaller puffs around it, instead of several similar-sized scattered blobs that read as "lots of small independent clouds"</li>
+</ul>
+
 <h2>Version 1.8.0 (2026-07-15)</h2>
 <ul>
   <li>New 8th mode: <strong>Cloud</strong> - playful, non-competitive, same instant-play/no-timer/no-health/no-score shape as Team. One giant, soft, realistic-looking cloud drifts across the map in a fixed direction and respawns on the opposite side once it's fully gone - shape validated against a real weather-map reference photo before building (a wispy, uneven point-scatter texture, not a solid outline)</li>
