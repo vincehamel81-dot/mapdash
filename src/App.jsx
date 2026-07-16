@@ -119,6 +119,12 @@ const DEBUG_ROUND_MS = (() => {
 export const MODE_CONFIG = {
   single: { label: 'Single', roomBased: false, hostGatedStart: false, minPlayers: 1, maxPlayers: 1, roundDurationMs: null, wideBbox: true },
   team: { label: 'Team', roomBased: true, hostGatedStart: false, minPlayers: 2, maxPlayers: 50, roundDurationMs: null, wideBbox: true },
+  // Playful, non-competitive: same immediate-play shape as Team (no waiting-room gate, no round
+  // timer/health/score), on the tight bbox (not wideBbox) so the mega-cloud's size reads against
+  // the same play area Survival's clouds use, per the size comparison in the original request
+  // ("10x as big as the biggest current cloud in survival"). minPlayers 1 so a solo host can spin
+  // one up just to watch the cloud drift.
+  cloud: { label: 'Cloud', roomBased: true, hostGatedStart: false, minPlayers: 1, maxPlayers: 50, roundDurationMs: null },
   // fixedPlayerCount: every Survival round is auto-filled with NPCs at start to reach exactly
   // this many total (minPlayers 1 - a solo host can start, then gets 99 bots). maxPlayers must be
   // at least fixedPlayerCount so a full-human lobby isn't blocked from starting.
@@ -452,6 +458,82 @@ function cloudsToGeoJSON(clouds) {
       properties: { id: cloud.id, tier: cloud.tier || null }
     }))
   }
+}
+
+// Cloud mode: a single giant, soft, "satellite photo" style cloud rather than the small hard-edge
+// polygon blobs above - direct feedback against a rendered comparison of three techniques asked
+// for a wispy/uneven shape, not a crisp fluffy silhouette or a uniformly blurred one. Approximated
+// the same way a real MapLibre `heatmap` layer works: scatter weighted points across a few density
+// centers and let the layer's own blur kernel do the softening, rather than drawing one blurred
+// outline (tested and rejected - reads as uniformly soft, loses the organic texture).
+// Real wind speeds (25-110 km/h) were tried first and verified via script against the actual
+// bbox diagonal (~18.4km) - even "fast" took ~13 minutes to fully cross, and "slow" nearly an
+// hour, far too slow for a mode meant to be glanced at while driving. Bumped up (same idea as
+// Survival's 10x wind) so a full crossing takes roughly 1.5-8 minutes depending on speed/size.
+const CLOUD_SPEED_KMH = { slow: 250, medium: 500, fast: 1000 }
+const CLOUD_SIZE_METERS = { small: 2500, medium: 5000, large: 8000 }
+const DEFAULT_CLOUD_SETTINGS = { direction: 'E', speedLabel: 'medium', sizeLabel: 'medium' }
+const MEGA_CLOUD_TICK_MS = 2000
+const MEGA_CLOUD_POINT_COUNT = 260
+
+// Same seeded-PRNG-per-id trick as cloudPolygonCoords: the point scatter is entirely derived from
+// the cloud's own id (plus its live size setting), so it's stable frame to frame as the cloud
+// drifts, yet reshuffles into a new arrangement on every respawn - and resizing the "Size" host
+// control applies instantly to the current cloud instead of waiting for the next respawn.
+function megaCloudLobes(cloudId, sizeMeters) {
+  const rand = seededRandom(cloudId)
+  const lobeCount = 5 + Math.floor(rand() * 4)
+  const lobes = [{ bearing: 0, distance: 0, radius: sizeMeters * 0.7, weight: 1 }]
+  for (let i = 0; i < lobeCount; i++) {
+    lobes.push({
+      bearing: rand() * 360,
+      distance: sizeMeters * (0.2 + rand() * 0.35),
+      radius: sizeMeters * (0.35 + rand() * 0.3),
+      weight: 0.6 + rand() * 0.4
+    })
+  }
+  return { rand, lobes }
+}
+
+function megaCloudPointsGeoJSON(cloud, sizeMeters) {
+  if (!cloud) return { type: 'FeatureCollection', features: [] }
+  const { rand, lobes } = megaCloudLobes(cloud.id, sizeMeters)
+  const features = []
+  for (let i = 0; i < MEGA_CLOUD_POINT_COUNT; i++) {
+    const lobe = lobes[Math.floor(rand() * lobes.length)]
+    const [lobeLat, lobeLng] = offsetLatLng([cloud.lat, cloud.lng], lobe.bearing, lobe.distance)
+    // Sum-of-uniforms central-limit approximation of a gaussian - denser near each lobe's own
+    // center, thinning toward its edge, which is what gives the fringe its wispy unevenness.
+    const g = Math.abs((rand() + rand() + rand() - 1.5) / 1.5)
+    const [lat, lng] = offsetLatLng([lobeLat, lobeLng], rand() * 360, g * lobe.radius)
+    features.push({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [lng, lat] },
+      properties: { weight: lobe.weight * (1 - g * 0.5) }
+    })
+  }
+  return { type: 'FeatureCollection', features }
+}
+
+function bboxDiagonalMeters(box) {
+  return haversine([box.south, box.west], [box.north, box.east])
+}
+
+// A fresh cloud always starts just upwind of the bbox (opposite its travel direction) and drifts
+// straight across it. exitAtMeters is deliberately the full bbox diagonal (a safe overestimate
+// for any of the 8 travel directions, not just N/S/E/W) plus its own size, so it's genuinely fully
+// off-screen - not just past the center line - before the next one spawns in.
+function spawnMegaCloud(settings) {
+  const direction = settings?.direction || DEFAULT_CLOUD_SETTINGS.direction
+  const sizeMeters = CLOUD_SIZE_METERS[settings?.sizeLabel] ?? CLOUD_SIZE_METERS.medium
+  const bearing = CARDINAL_ANGLES[direction] ?? CARDINAL_ANGLES[DEFAULT_CLOUD_SETTINGS.direction]
+  const diagonal = bboxDiagonalMeters(CONFIG.bbox)
+  const center = { lat: (CONFIG.bbox.south + CONFIG.bbox.north) / 2, lng: (CONFIG.bbox.west + CONFIG.bbox.east) / 2 }
+  // Random lateral offset (perpendicular to travel) so successive clouds don't all cross the exact
+  // same line, then pushed back upwind by half the diagonal plus its own size.
+  const [lateralLat, lateralLng] = offsetLatLng([center.lat, center.lng], (bearing + 90) % 360, (Math.random() - 0.5) * diagonal * 0.6)
+  const [lat, lng] = offsetLatLng([lateralLat, lateralLng], (bearing + 180) % 360, diagonal / 2 + sizeMeters)
+  return { id: crypto.randomUUID(), lat, lng, createdAt: Date.now(), traveledMeters: 0, exitAtMeters: diagonal + sizeMeters * 2 }
 }
 
 // MapLibre's source.setData() has no built-in tweening - a raw position change is an instant
@@ -792,6 +874,7 @@ export default function App({ playerName, renameName, joinRequest }) {
   // eslint-disable-next-line no-unused-vars
   const [mapViewTick, setMapViewTick] = useState(0)
   const [clouds, setClouds] = useState([])
+  const [megaCloud, setMegaCloud] = useState(null)
   const [wind, setWind] = useState({ direction: 'NE', speed: 20, angle: CARDINAL_ANGLES.NE })
   const [roomCode, setRoomCode] = useState('')
   const name = playerName || 'Player'
@@ -879,6 +962,30 @@ export default function App({ playerName, renameName, joinRequest }) {
         'fill-color': ['match', ['get', 'tier'], 'black', '#353232', 'gray', '#969191', '#FFFFFF'],
         'fill-opacity': 0.9,
         'fill-outline-color': 'rgba(90,110,135,0.55)'
+      }
+    })
+    // Cloud mode's single mega-cloud: a heatmap layer fed by megaCloudPointsGeoJSON's weighted
+    // point scatter instead of a filled polygon - the blur/density gradient this gives is native
+    // to the layer type, not something a `fill` layer can do at all. Dark grey, single color, per
+    // the original request. Empty (no data) outside Cloud mode - see the render effect below.
+    map.addSource('mega-cloud', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
+    map.addLayer({
+      id: 'mega-cloud',
+      type: 'heatmap',
+      source: 'mega-cloud',
+      paint: {
+        'heatmap-weight': ['get', 'weight'],
+        'heatmap-intensity': 1,
+        'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 11, 18, 14, 34, 17, 60],
+        'heatmap-opacity': 0.85,
+        'heatmap-color': [
+          'interpolate', ['linear'], ['heatmap-density'],
+          0, 'rgba(58,58,58,0)',
+          0.2, 'rgba(58,58,58,0.25)',
+          0.5, 'rgba(58,58,58,0.55)',
+          0.8, 'rgba(58,58,58,0.78)',
+          1, 'rgba(58,58,58,0.92)'
+        ]
       }
     })
     // An outline of the playable area - the boundary itself isn't driveable-past-blocked, but
@@ -1072,6 +1179,7 @@ export default function App({ playerName, renameName, joinRequest }) {
     setHealth(1000)
     healthRef.current = 1000
     setClouds([])
+    setMegaCloud(null)
     setEliminated(false)
     if (!isSupabaseConfigured || !joinedRoomCode) {
       roomChannelRef.current = null
@@ -1836,6 +1944,22 @@ export default function App({ playerName, renameName, joinRequest }) {
     if (source) source.setData(bboxOutlineGeoJSON(wideBboxMode ? CONFIG.bboxWide : CONFIG.bbox))
   }, [wideBboxMode, mapReady])
 
+  // Re-scatters the mega-cloud's points on every position tick (megaCloud changes every
+  // MEGA_CLOUD_TICK_MS) and whenever the host live-adjusts Size - empty outside Cloud mode so the
+  // layer is simply invisible (no data) rather than needing its own visibility toggle.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !mapReady) return
+    const source = map.getSource('mega-cloud')
+    if (!source) return
+    if (currentRoom?.mode !== 'cloud' || !megaCloud) {
+      source.setData({ type: 'FeatureCollection', features: [] })
+      return
+    }
+    const sizeMeters = CLOUD_SIZE_METERS[currentRoom.cloudSettings?.sizeLabel] ?? CLOUD_SIZE_METERS.medium
+    source.setData(megaCloudPointsGeoJSON(megaCloud, sizeMeters))
+  }, [megaCloud, currentRoom?.mode, currentRoom?.cloudSettings?.sizeLabel, mapReady])
+
   useEffect(() => {
     const map = mapRef.current
     if (!map || !mapReady) return
@@ -2026,8 +2150,10 @@ export default function App({ playerName, renameName, joinRequest }) {
       // Same bug as the NPC tick: this had no status check at all, so clouds kept spawning,
       // drifting, and writing to the room indefinitely after a round finished. Only gated on
       // 'finished' specifically (not 'waiting') so decorative pre-round ambiance is unaffected,
-      // and solo/no-room play (room is null here) is unaffected too.
-      if (room?.status === 'finished') return
+      // and solo/no-room play (room is null here) is unaffected too. Cloud mode is also skipped
+      // entirely - its own single mega-cloud (see the tick effect below) is the whole point of
+      // that mode, and the small hard-edge decorative clouds here would visually clash with it.
+      if (room?.status === 'finished' || room?.mode === 'cloud') return
       const isSurvival = room?.mode === 'survival'
       const isHost = room?.host === live.name
       const minCount = isSurvival ? CLOUD_MIN_COUNT_SURVIVAL : CLOUD_MIN_COUNT
@@ -2080,7 +2206,44 @@ export default function App({ playerName, renameName, joinRequest }) {
     }
   }, [currentRoom, isRoomHost])
 
-  
+  // Cloud mode's mega-cloud lifecycle: host alone drives it forward at a fixed bearing (never the
+  // random global `wind`) and respawns it upwind once it's fully crossed the bbox - same
+  // host-authoritative-tick-writes-to-room, everyone-else-mirrors shape as the ambient clouds
+  // above, just for a single object instead of a list. Settings (direction/speed/size) are read
+  // fresh from the room every tick, so a host tweaking them mid-flight takes effect immediately.
+  useEffect(() => {
+    if (currentRoom?.mode !== 'cloud') return
+    const tick = () => {
+      const live = liveRef.current
+      const room = live.currentRoom
+      if (!room || room.mode !== 'cloud') return
+      if (room.host !== live.name) return
+      const settings = room.cloudSettings || DEFAULT_CLOUD_SETTINGS
+      const speedKmh = CLOUD_SPEED_KMH[settings.speedLabel] ?? CLOUD_SPEED_KMH.medium
+      const bearing = CARDINAL_ANGLES[settings.direction] ?? CARDINAL_ANGLES[DEFAULT_CLOUD_SETTINGS.direction]
+      const distanceMeters = (speedKmh / 3.6) * (MEGA_CLOUD_TICK_MS / 1000)
+      const current = room.megaCloud
+      let next
+      if (!current) {
+        next = spawnMegaCloud(settings)
+      } else {
+        const [lat, lng] = offsetLatLng([current.lat, current.lng], bearing, distanceMeters)
+        const traveledMeters = (current.traveledMeters || 0) + distanceMeters
+        next = traveledMeters >= (current.exitAtMeters || Infinity) ? spawnMegaCloud(settings) : { ...current, lat, lng, traveledMeters }
+      }
+      live.updateRoom(room.code, (r) => ({ ...r, megaCloud: next }))
+      setMegaCloud(next)
+    }
+    tick()
+    const interval = window.setInterval(tick, MEGA_CLOUD_TICK_MS)
+    return () => window.clearInterval(interval)
+  }, [currentRoom?.mode])
+
+  // Non-host clients mirror the room's mega-cloud position the same way they mirror ambient clouds.
+  useEffect(() => {
+    if (!currentRoom || currentRoom.mode !== 'cloud') return
+    if (!isRoomHost) setMegaCloud(currentRoom.megaCloud || null)
+  }, [currentRoom, isRoomHost])
 
   const getRoomCapacity = (roomMode) => MODE_CONFIG[roomMode]?.maxPlayers ?? 4
 
@@ -2391,7 +2554,9 @@ export default function App({ playerName, renameName, joinRequest }) {
       itName: null,
       roundStartedAt: null,
       winners: [],
-      maxPlayers: getRoomCapacity(mode)
+      maxPlayers: getRoomCapacity(mode),
+      cloudSettings: DEFAULT_CLOUD_SETTINGS,
+      megaCloud: null
     }
 
     setRooms([...roomsRef.current, newRoom])
@@ -3112,6 +3277,41 @@ export default function App({ playerName, renameName, joinRequest }) {
           </label>
         </div>
       ) : null}
+      {isRoomHost && currentRoom.mode === 'cloud' ? (
+        <div className="room-meta cloud-settings">
+          <label className="center-toggle">
+            Direction:{' '}
+            <select
+              value={currentRoom.cloudSettings?.direction ?? DEFAULT_CLOUD_SETTINGS.direction}
+              onChange={(e) => updateRoom(currentRoom.code, (r) => ({ ...r, cloudSettings: { ...(r.cloudSettings || DEFAULT_CLOUD_SETTINGS), direction: e.target.value } }))}
+            >
+              {WIND_DIRECTIONS.map((d) => <option key={d} value={d}>{d}</option>)}
+            </select>
+          </label>
+          <label className="center-toggle">
+            Speed:{' '}
+            <select
+              value={currentRoom.cloudSettings?.speedLabel ?? DEFAULT_CLOUD_SETTINGS.speedLabel}
+              onChange={(e) => updateRoom(currentRoom.code, (r) => ({ ...r, cloudSettings: { ...(r.cloudSettings || DEFAULT_CLOUD_SETTINGS), speedLabel: e.target.value } }))}
+            >
+              <option value="slow">Slow</option>
+              <option value="medium">Medium</option>
+              <option value="fast">Fast</option>
+            </select>
+          </label>
+          <label className="center-toggle">
+            Size:{' '}
+            <select
+              value={currentRoom.cloudSettings?.sizeLabel ?? DEFAULT_CLOUD_SETTINGS.sizeLabel}
+              onChange={(e) => updateRoom(currentRoom.code, (r) => ({ ...r, cloudSettings: { ...(r.cloudSettings || DEFAULT_CLOUD_SETTINGS), sizeLabel: e.target.value } }))}
+            >
+              <option value="small">Small</option>
+              <option value="medium">Medium</option>
+              <option value="large">Large</option>
+            </select>
+          </label>
+        </div>
+      ) : null}
       <div className="room-player-list">
         <div className="room-player-title">
           Players
@@ -3365,7 +3565,7 @@ export default function App({ playerName, renameName, joinRequest }) {
                   <button className={`cloud-button${turboButtonOn ? ' turbo-toggle-on' : ''}`} onClick={() => setTurboButtonOn((t) => !t)}>
                     {turboButtonOn ? 'Turbo: ON' : 'Turbo'}
                   </button>
-                  {currentRoom?.mode === 'survival' ? null : (
+                  {currentRoom?.mode === 'survival' || currentRoom?.mode === 'cloud' ? null : (
                     <button className="cloud-button" onClick={addCloud} disabled={cloudCooldown}>Add cloud</button>
                   )}
                   {joinedRoomCode ? (
