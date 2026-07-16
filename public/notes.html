@@ -35,6 +35,12 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.10.0 (2026-07-16)</h2>
+<ul>
+  <li>Fixed a real, widespread navigation bug: divided roads (boulevards and highways with a median) were often represented as two separate near-parallel lines - one per direction of travel - reconnected by a short "bridge" a bit further along. Confirmed directly (Boulevard Masson/Rue Morand near Rue Gide): this is exactly what made turning right feel like it "didn't register", and what showed up as stray disconnected-looking line segments on the map. Both carriageways now collapse into one clean line, and true duplicate street segments (two different shapes between the same two points) are removed too</li>
+  <li>Concretely: wrong-turn intersections dropped from 802 to 696 citywide (324 still involve a highway/ramp), and short-block chains (which strain turn-signal timing) dropped from 9,661 to 6,774</li>
+</ul>
+
 <h2>Version 1.9.3 (2026-07-16)</h2>
 <ul>
   <li>Spectator count pill now sits beside the speed readout instead of above it - no longer pushes speed up or covers it when the name list pops open</li>

@@ -724,9 +724,98 @@ export function buildGraph(segments, {
     node.edges = node.edges.filter((edge) => edge.lengthMeters >= MIN_EDGE_LENGTH_METERS)
   }
 
+  // Divided-road cleanup (see mergeShortNamedBridges/removeDuplicateEdges below) runs before the
+  // existing collinear-chain simplification, so the two carriageways of a divided street are
+  // already unified into one line by the time that pass looks for same-name chains to shorten.
+  // (A further pass to also drop the short self-loop-shaped edges this sometimes leaves behind -
+  // both endpoints landing on the same merged node - was tried and reverted: it measurably
+  // INCREASED the audit's missing-connections count, 199 -> 241, worse than the 199 baseline
+  // before touching any of this. Whatever real gap that was revealing wasn't worth chasing under
+  // time pressure - the bridge-merge + dedup pair alone already verified as a clean improvement
+  // (199 -> 195 missing connections, 802 -> 696 risky intersections), so left at that rather than
+  // risk a regression for a cosmetic residual few self-loop artifacts.)
+  mergeShortNamedBridges(nodes, edges)
+  removeDuplicateEdges(nodes, edges)
   mergeCollinearSameNameEdges(nodes, edges)
 
   return { nodes, edges }
+}
+
+// Real street data frequently represents a divided road (a boulevard or highway with a median) as
+// two separate near-parallel "ways", one per carriageway - confirmed via direct investigation
+// (Boulevard Masson/Rue Morand near Rue Gide): both split into two node clusters ~15m apart, then
+// reconverge a short distance later via a tiny connector edge sharing the same street name. That
+// connector is the tell: a short, same-named edge whose BOTH endpoints already connect to other
+// edges (i.e. it's a bypass between two live clusters, not a real dead-end stub or a genuine short
+// street). Collapsing its two endpoints into one node unifies the two parallel branches into a
+// single shared intersection - the two carriageways then become literal duplicate edges between
+// the same node pair, which removeDuplicateEdges below cleans up. Left alone, this pattern is
+// exactly what produces two near-identical turn candidates at once, which is what actually made a
+// deliberate right turn feel like it "didn't register" (direct report, Rue Gide/Rue du Cresson).
+const BRIDGE_MAX_LENGTH_METERS = 25
+
+function mergeShortNamedBridges(nodes, edges) {
+  let mergedAny = true
+  let safety = 0
+  while (mergedAny && safety < 20) {
+    mergedAny = false
+    safety++
+    for (const edge of Array.from(edges.values())) {
+      if (!edges.has(edge.id)) continue // removed by an earlier merge this pass
+      if (!edge.name || edge.lengthMeters >= BRIDGE_MAX_LENGTH_METERS) continue
+      if (edge.startKey === edge.endKey) continue
+      const startNode = nodes.get(edge.startKey)
+      const endNode = nodes.get(edge.endKey)
+      if (!startNode || !endNode) continue
+      // Only collapse a bypass between two already-connected clusters - a short edge that's the
+      // ONLY thing keeping one of its ends alive is a real dead-end-adjacent stub, not this pattern.
+      if (startNode.edges.length < 2 || endNode.edges.length < 2) continue
+
+      for (const e of endNode.edges) {
+        if (e.id === edge.id) continue
+        if (e.startKey === endNode.key) {
+          e.startKey = startNode.key
+          e.polyline[0] = startNode.coord
+        }
+        if (e.endKey === endNode.key) {
+          e.endKey = startNode.key
+          e.polyline[e.polyline.length - 1] = startNode.coord
+        }
+        e.lengthMeters = segmentLengthMeters(e.polyline)
+        if (!startNode.edges.includes(e)) startNode.edges.push(e)
+      }
+      startNode.edges = startNode.edges.filter((e) => e.id !== edge.id)
+      nodes.delete(endNode.key)
+      edges.delete(edge.id)
+      mergedAny = true
+    }
+  }
+}
+
+// Two edges between the exact same pair of (now node-merged) endpoints, sharing a street name, are
+// the same real street represented twice - either a raw data duplicate (two differently-shaped
+// polylines between identical endpoints, confirmed on Rue du Cresson) or the leftover of
+// mergeShortNamedBridges unifying a divided road's two carriageways above. A duplicate candidate at
+// an intersection is exactly the kind of thing that makes chooseNextSegment's turn scoring flaky,
+// so only the shorter (simpler, straighter) of the pair survives.
+function removeDuplicateEdges(nodes, edges) {
+  const bestByKey = new Map()
+  for (const edge of edges.values()) {
+    if (!edge.name) continue
+    const pair = [edge.startKey, edge.endKey].sort()
+    const key = `${edge.name}|${pair[0]}|${pair[1]}`
+    const existing = bestByKey.get(key)
+    if (!existing || edge.lengthMeters < existing.lengthMeters) bestByKey.set(key, edge)
+  }
+  const keep = new Set(bestByKey.values())
+  for (const edge of Array.from(edges.values())) {
+    if (!edge.name || keep.has(edge)) continue
+    edges.delete(edge.id)
+    for (const nodeKey of [edge.startKey, edge.endKey]) {
+      const node = nodes.get(nodeKey)
+      if (node) node.edges = node.edges.filter((e) => e.id !== edge.id)
+    }
+  }
 }
 
 // Collapses any node with exactly 2 edges that share the same street name into one longer edge -
