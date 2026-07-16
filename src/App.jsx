@@ -475,19 +475,28 @@ const CLOUD_SPEED_KMH = { slow: 250, medium: 500, fast: 1000 }
 const CLOUD_SIZE_METERS = { small: 2500, medium: 5000, large: 8000, xl: 12000, xxl: 18000 }
 const DEFAULT_CLOUD_SETTINGS = { direction: 'E', speedLabel: 'medium', sizeLabel: 'medium' }
 const MEGA_CLOUD_TICK_MS = 2000
-const MEGA_CLOUD_POINT_COUNT = 320
 
-// Direct feedback on the first version: "the end result was just lots of points mostly... make
-// bigger cloud cores... can't be 100% small independent clouds." The first version picked among
-// the core and 5-8 similar-sized satellite lobes with equal probability, so no single lobe ever
-// dominated - it read as a loose cluster of small clouds, not one big cloud with a few puffs
-// around it. Now there's always exactly one dominant core (bigger radius, ~60% of all points) and
-// a handful of smaller satellites pushed further out, picked by a weighted draw so the core
-// actually reads as the cloud's main mass.
+// A live screenshot of the first "dominant core" version still read as scattered dots, not one
+// dense cloud - a fixed point count meant XL/XXL spread the same ~320 points across a much bigger
+// area (looking sparser, not denser), and the individual points weren't close enough together to
+// actually fuse under the heatmap blur. Point count now scales with the chosen size so density per
+// unit area stays roughly constant.
+function megaCloudPointCount(sizeMeters) {
+  return Math.round(140 * (sizeMeters / 1000))
+}
+
+// Direct feedback, twice now: first "lots of points mostly... make bigger cloud cores", then still
+// "way too scattered" after the first fix. Three changes past that first attempt: (1) satellites
+// pulled in much closer to the core and shrunk, so they read as puffs ON the cloud instead of
+// separate mini-clouds off to the side; (2) point count scales with size (see
+// megaCloudPointCount); (3) each point's distance from its lobe center is biased hard toward the
+// center (see the `g ** 1.6` below) instead of spreading fairly evenly out to the lobe's full
+// radius, so the mass stays dense in the middle with only a soft, thin fringe - not a wide halo of
+// isolated dots.
 function megaCloudLobes(cloudId, sizeMeters) {
   const rand = seededRandom(cloudId)
   const satelliteCount = 2 + Math.floor(rand() * 3) // 2-4
-  const core = { bearing: 0, distance: 0, radius: sizeMeters * 0.95, weight: 1, pointShare: 0.6 }
+  const core = { bearing: 0, distance: 0, radius: sizeMeters * 0.85, weight: 1, pointShare: 0.68 }
   const lobes = [core]
   let remainingShare = 1 - core.pointShare
   for (let i = 0; i < satelliteCount; i++) {
@@ -496,10 +505,10 @@ function megaCloudLobes(cloudId, sizeMeters) {
     remainingShare -= share
     lobes.push({
       bearing: rand() * 360,
-      // Pushed out past the core's own radius so satellites read as distinct puffs beside the
-      // main mass instead of just padding out its edge.
-      distance: sizeMeters * (0.55 + rand() * 0.35),
-      radius: sizeMeters * (0.16 + rand() * 0.16),
+      // Pulled in from the first version's 0.55-0.9x (which read as detached mini-clouds) to sit
+      // right against the core's own edge instead of floating well past it.
+      distance: sizeMeters * (0.35 + rand() * 0.2),
+      radius: sizeMeters * (0.22 + rand() * 0.18),
       weight: 0.55 + rand() * 0.3,
       pointShare: Math.max(share, 0.02)
     })
@@ -523,13 +532,17 @@ function pickWeightedLobe(rand, lobes) {
 function megaCloudPointsGeoJSON(cloud, sizeMeters) {
   if (!cloud) return { type: 'FeatureCollection', features: [] }
   const { rand, lobes } = megaCloudLobes(cloud.id, sizeMeters)
+  const pointCount = megaCloudPointCount(sizeMeters)
   const features = []
-  for (let i = 0; i < MEGA_CLOUD_POINT_COUNT; i++) {
+  for (let i = 0; i < pointCount; i++) {
     const lobe = pickWeightedLobe(rand, lobes)
     const [lobeLat, lobeLng] = offsetLatLng([cloud.lat, cloud.lng], lobe.bearing, lobe.distance)
-    // Sum-of-uniforms central-limit approximation of a gaussian - denser near each lobe's own
-    // center, thinning toward its edge, which is what gives the fringe its wispy unevenness.
-    const g = Math.abs((rand() + rand() + rand() - 1.5) / 1.5)
+    // Sum-of-uniforms central-limit approximation of a gaussian, then compressed further toward 0
+    // (**1.6) - the raw sum-of-3 spread points fairly evenly all the way out to the lobe's radius,
+    // which is what read as a wide, sparse halo. Biasing hard toward the center keeps the visible
+    // mass dense, with only a thin, soft fringe instead of scattered stray points.
+    const gRaw = Math.abs((rand() + rand() + rand() - 1.5) / 1.5)
+    const g = Math.pow(gRaw, 1.6)
     const [lat, lng] = offsetLatLng([lobeLat, lobeLng], rand() * 360, g * lobe.radius)
     features.push({
       type: 'Feature',
@@ -1015,11 +1028,10 @@ export default function App({ playerName, renameName, joinRequest }) {
       source: 'mega-cloud',
       paint: {
         'heatmap-weight': ['get', 'weight'],
-        'heatmap-intensity': 1,
-        // Bumped up from the first version, which read as separate small puffs rather than one
-        // blended mass - a wider blur kernel is what actually lets the now-denser core's points
-        // fuse together into a solid-looking center instead of staying visually distinct dots.
-        'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 11, 26, 14, 48, 17, 85],
+        // Bumped up alongside the point-density rework below - a live screenshot of the previous
+        // tuning still showed a wide halo of individually-visible dots rather than a fused mass.
+        'heatmap-intensity': 1.4,
+        'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 11, 34, 14, 62, 17, 105],
         'heatmap-opacity': 0.85,
         // Threshold raised before any color shows (0 stays transparent past 0.15 density, not just
         // past 0) so the sparse, spread-out satellite points don't show up as a stippled/speckled
