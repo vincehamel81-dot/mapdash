@@ -35,6 +35,11 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.8.4 (2026-07-16)</h2>
+<ul>
+  <li>Cloud mode: found the actual cause of "still thousands of dots" even in an otherwise-dense view - any lightly-overlapping point was crossing the color ramp's low threshold and rendering as its own tiny visible blob instead of fading out. Raised that threshold a lot higher (only genuinely-fused clusters render at all now), pulled the satellite puffs in tighter against the core, and roughly doubled point density again</li>
+</ul>
+
 <h2>Version 1.8.3 (2026-07-16)</h2>
 <ul>
   <li>Fixed a real bug behind "looks great zoomed out, hundreds of little dots zoomed in": the cloud's blur radius is measured in screen pixels, but its points are spread out in fixed real-world distances - zooming in makes those points drift much farther apart on screen than the blur radius was scaling to match. Radius now roughly doubles every zoom level instead of barely increasing, so the same dense look now holds at any zoom, not just zoomed out</li>

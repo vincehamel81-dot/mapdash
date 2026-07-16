@@ -480,19 +480,25 @@ const MEGA_CLOUD_TICK_MS = 2000
 // dense cloud - a fixed point count meant XL/XXL spread the same ~320 points across a much bigger
 // area (looking sparser, not denser), and the individual points weren't close enough together to
 // actually fuse under the heatmap blur. Point count now scales with the chosen size so density per
-// unit area stays roughly constant.
+// unit area stays roughly constant. Bumped again (140->260/km) after a further live screenshot
+// still showed visible individual blobs even in the "dense" zoomed-out view - see the color-ramp
+// comment below for the other half of that fix.
 function megaCloudPointCount(sizeMeters) {
-  return Math.round(140 * (sizeMeters / 1000))
+  return Math.round(260 * (sizeMeters / 1000))
 }
 
-// Direct feedback, twice now: first "lots of points mostly... make bigger cloud cores", then still
-// "way too scattered" after the first fix. Three changes past that first attempt: (1) satellites
-// pulled in much closer to the core and shrunk, so they read as puffs ON the cloud instead of
-// separate mini-clouds off to the side; (2) point count scales with size (see
-// megaCloudPointCount); (3) each point's distance from its lobe center is biased hard toward the
-// center (see the `g ** 1.6` below) instead of spreading fairly evenly out to the lobe's full
-// radius, so the mass stays dense in the middle with only a soft, thin fringe - not a wide halo of
-// isolated dots.
+// Direct feedback, three rounds now: "lots of points... make bigger cores", then "still too
+// scattered", then (after a live screenshot) "still thousands of dots, not realistic" even in a
+// view that was genuinely dense. That last round pointed at a different culprit than raw density:
+// any two adjacent points' circular falloffs only fuse into one continuous shape where they
+// overlap enough - sparser regions (satellite lobes, every lobe's own outer fringe) don't overlap
+// enough, so the LOW-density color ramp stop (see heatmap-color below) was making every one of
+// those under-overlapping spots visible as its own small blob instead of just fading out. Fixed
+// from both ends: lobes pulled in tighter here (satellites now sit right against the core instead
+// of floating a visible gap away) and per-point placement biased harder toward each lobe's own
+// center (g**2.2 below, up from 1.6), AND the color ramp (below) now stays fully transparent
+// through a much higher density threshold so only genuinely-fused regions render at all - isolated
+// or lightly-overlapping points no longer show up as their own visible dot.
 function megaCloudLobes(cloudId, sizeMeters) {
   const rand = seededRandom(cloudId)
   const satelliteCount = 2 + Math.floor(rand() * 3) // 2-4
@@ -505,10 +511,10 @@ function megaCloudLobes(cloudId, sizeMeters) {
     remainingShare -= share
     lobes.push({
       bearing: rand() * 360,
-      // Pulled in from the first version's 0.55-0.9x (which read as detached mini-clouds) to sit
-      // right against the core's own edge instead of floating well past it.
-      distance: sizeMeters * (0.35 + rand() * 0.2),
-      radius: sizeMeters * (0.22 + rand() * 0.18),
+      // Pulled in further still - the previous 0.35-0.55x still read as separate detached blobs in
+      // a live screenshot. Now close enough to overlap the core's own edge directly.
+      distance: sizeMeters * (0.2 + rand() * 0.15),
+      radius: sizeMeters * (0.2 + rand() * 0.16),
       weight: 0.55 + rand() * 0.3,
       pointShare: Math.max(share, 0.02)
     })
@@ -538,11 +544,11 @@ function megaCloudPointsGeoJSON(cloud, sizeMeters) {
     const lobe = pickWeightedLobe(rand, lobes)
     const [lobeLat, lobeLng] = offsetLatLng([cloud.lat, cloud.lng], lobe.bearing, lobe.distance)
     // Sum-of-uniforms central-limit approximation of a gaussian, then compressed further toward 0
-    // (**1.6) - the raw sum-of-3 spread points fairly evenly all the way out to the lobe's radius,
-    // which is what read as a wide, sparse halo. Biasing hard toward the center keeps the visible
-    // mass dense, with only a thin, soft fringe instead of scattered stray points.
+    // (**2.2, up from 1.6) - the raw sum-of-3 still spread points too evenly out to the lobe's
+    // radius, leaving an outer fringe sparse enough that the color ramp's low-density cutoff (see
+    // heatmap-color) rendered it as separate visible dots rather than a soft fade.
     const gRaw = Math.abs((rand() + rand() + rand() - 1.5) / 1.5)
-    const g = Math.pow(gRaw, 1.6)
+    const g = Math.pow(gRaw, 2.2)
     const [lat, lng] = offsetLatLng([lobeLat, lobeLng], rand() * 360, g * lobe.radius)
     features.push({
       type: 'Feature',
@@ -1030,7 +1036,9 @@ export default function App({ playerName, renameName, joinRequest }) {
         'heatmap-weight': ['get', 'weight'],
         // Bumped up alongside the point-density rework below - a live screenshot of the previous
         // tuning still showed a wide halo of individually-visible dots rather than a fused mass.
-        'heatmap-intensity': 1.4,
+        // Raised again with the higher heatmap-color cutoff below, so genuinely-fused regions
+        // still cross it easily.
+        'heatmap-intensity': 1.8,
         // heatmap-radius is in screen PIXELS, but the point scatter's spacing is fixed in real
         // meters - zooming in 6 levels (say 11 to 17) makes any two fixed-position points ~64x
         // farther apart on screen, since each zoom level roughly doubles pixels-per-meter. The
@@ -1044,17 +1052,20 @@ export default function App({ playerName, renameName, joinRequest }) {
           11, 22, 12, 43, 13, 86, 14, 172, 15, 344, 16, 688, 17, 1376, 18, 2752
         ],
         'heatmap-opacity': 0.85,
-        // Threshold raised before any color shows (0 stays transparent past 0.15 density, not just
-        // past 0) so the sparse, spread-out satellite points don't show up as a stippled/speckled
-        // texture - only genuinely dense clusters (the core, and the denser parts of satellites)
-        // read as solid, reinforcing the "one cloud with puffs around it" look over "many dots".
+        // The real fix for "thousands of visible dots": any point (or lightly-overlapping pair of
+        // points) that only reaches low density was still crossing the old 0.15 cutoff and
+        // rendering as its own small visible blob - individually, not fused with anything. Raising
+        // the cutoff much higher (0.45) means an isolated or sparsely-overlapping point now stays
+        // fully invisible; only areas where enough points genuinely pile up together (the real
+        // body of the cloud) cross the line and render, and everything above that fuses smoothly
+        // instead of stepping through visible bands (fewer, gentler stops now, not a sharp ramp).
         'heatmap-color': [
           'interpolate', ['linear'], ['heatmap-density'],
           0, 'rgba(58,58,58,0)',
-          0.15, 'rgba(58,58,58,0)',
-          0.4, 'rgba(58,58,58,0.4)',
-          0.7, 'rgba(58,58,58,0.72)',
-          1, 'rgba(58,58,58,0.92)'
+          0.45, 'rgba(58,58,58,0)',
+          0.6, 'rgba(58,58,58,0.3)',
+          0.8, 'rgba(58,58,58,0.6)',
+          1, 'rgba(58,58,58,0.9)'
         ]
       }
     })
