@@ -941,7 +941,6 @@ function ScreenOverlay({ wind, players = [], items = [], radarTargets = [], star
           </div>
         </div>
       ) : null}
-      ) : null}
       {players.map((p) => (
         <div key={p.name} className="player-dot" style={{ left: `${p.screenX}%`, top: `${p.screenY}%`, color: p.color }}>
           <div className="car-marker-label">{p.name}{p.health != null ? ` - ${p.health}` : ''}</div>
