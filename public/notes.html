@@ -35,6 +35,11 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.10.2 (2026-07-16)</h2>
+<ul>
+  <li>Widened how far a dead-end street will look for another nearby street to connect to (25m to 65m, tested directly against the real map data - real gaps go up to 60m, and going wider doesn't cause any new wrong turns elsewhere). Fixes 3 out of every 4 remaining "street stops short of where it should obviously continue" spots citywide (244 down to 60)</li>
+</ul>
+
 <h2>Version 1.10.1 (2026-07-16)</h2>
 <ul>
   <li>Further navigation cleanup: the divided-road fix from the last update left small "self-loop" fragments behind at ~2,700 spots citywide (a street segment that starts and ends at the same intersection - pure merge leftover, not a real road). These are now removed too. Wrong-turn intersections dropped again, 696 to 572, and short-block chains nearly halved, 6,774 to 3,248</li>

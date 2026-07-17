@@ -172,9 +172,15 @@ function mergeNearbyNodes(rawNodes, toleranceMeters) {
 // T-intersection). Fix that by snapping each dangling endpoint to the nearest touch point on any
 // other polyline within tolerance, splitting the touched polyline there so the graph gains a real
 // shared node. A grid index over polyline vertices keeps the nearest-edge search fast at scale.
-// Widened alongside DEFAULT_NODE_MERGE_TOLERANCE_METERS - see its comment for the direct
-// investigation (two reported spots, city-wide scan, tolerance tuning) behind this change.
-const INTERSECTION_SNAP_TOLERANCE_METERS = 25
+// Widened again (2026-07-16, 25m -> 65m) after live playtesting kept surfacing real dangling-stub
+// spots the audit's own missing-connections check already knew about (244 of them, gaps 30-60m,
+// beyond the old 25m reach). Tested tolerance 25-75m directly against the real dataset:
+// missing-connections dropped monotonically (244 -> 196 -> 118 -> 72 -> 60 -> 58) with
+// findRiskyIntersections staying flat throughout (572 -> ~577-579, noise-level, no reversal) - same
+// "not a tradeoff" shape as the 12m->25m tuning this constant already went through once. 65m is
+// where the gains flatten out hard (75m only found 2 more) and roughly matches the audit's own 60m
+// search window, so widening further wouldn't even be visible to it without changing that too.
+const INTERSECTION_SNAP_TOLERANCE_METERS = 65
 const VERTEX_GRID_CELL_METERS = 40
 
 function gridCellCoords([lat, lng], refLat, cellSize) {
