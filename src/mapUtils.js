@@ -667,6 +667,14 @@ function connectInteriorVertices(rawNodes, edges, toleranceMeters) {
   }
 }
 
+// TEMPORARY (v1.10.4 diagnostic build only): skip every tolerance/guess-based connectivity pass
+// and rely purely on the official dataset's own exact shared coordinates (already 99.6% connected
+// on its own - confirmed by direct investigation). Lets live playtesting with the debug graph
+// overlay show, from the root, which gaps are genuine and need a real fix vs which "gaps" the old
+// fuzzy passes were papering over while also inventing false connections elsewhere. Revert to
+// false once that review is done and a targeted (not blanket) reconnection strategy is chosen.
+const RAW_BASELINE_MODE = true
+
 export function buildGraph(segments, {
   toleranceMeters = DEFAULT_NODE_MERGE_TOLERANCE_METERS,
   dangleToleranceMeters = INTERSECTION_SNAP_TOLERANCE_METERS
@@ -692,9 +700,11 @@ export function buildGraph(segments, {
     endNode.edges.push(edge)
   }
 
-  splitCrossingEdges(rawNodes, edges)
-  snapDanglingEndpoints(rawNodes, edges, dangleToleranceMeters)
-  connectInteriorVertices(rawNodes, edges, VERTEX_PROXIMITY_TOLERANCE_METERS)
+  if (!RAW_BASELINE_MODE) {
+    splitCrossingEdges(rawNodes, edges)
+    snapDanglingEndpoints(rawNodes, edges, dangleToleranceMeters)
+    connectInteriorVertices(rawNodes, edges, VERTEX_PROXIMITY_TOLERANCE_METERS)
+  }
 
   // Safety net: each of the three passes above replaces/deletes edges as it splits/merges nodes,
   // updating the two nodes it directly knows about (an edge's own startKey/endKey) - but a node can
@@ -710,7 +720,7 @@ export function buildGraph(segments, {
     node.edges = node.edges.filter((edge) => edge && edges.has(edge.id))
   }
 
-  const nodes = mergeNearbyNodes(rawNodes, toleranceMeters)
+  const nodes = mergeNearbyNodes(rawNodes, RAW_BASELINE_MODE ? 0 : toleranceMeters)
 
   // splitPolylineAtDistances (used by both splitCrossingEdges and snapDanglingEndpoints) can
   // itself introduce a duplicate leading/trailing point when a cut falls exactly on - or very
@@ -747,7 +757,7 @@ export function buildGraph(segments, {
   // Divided-road cleanup (see mergeShortNamedBridges/removeDuplicateEdges below) runs before the
   // existing collinear-chain simplification, so the two carriageways of a divided street are
   // already unified into one line by the time that pass looks for same-name chains to shorten.
-  mergeShortNamedBridges(nodes, edges)
+  if (!RAW_BASELINE_MODE) mergeShortNamedBridges(nodes, edges)
   removeDuplicateEdges(nodes, edges)
 
   // A prior version of this also dropped the short self-loop-shaped edges these merges leave

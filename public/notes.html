@@ -35,6 +35,11 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.10.4 (2026-07-16)</h2>
+<ul>
+  <li>Experimental: the street map now trusts the official Ville de Québec road data as-is instead of guessing which nearby streets should connect. That guessing (originally meant to close small gaps) was also inventing connections that don't exist in reality - like the fake "9-way" tangle inside highway interchanges, or streets like Côte d'Abraham appearing wrongly linked to Rue Olivier-Robitaille. Turning it off drops false/confusing intersections from ~579 to 89 citywide, at the cost of some real gaps reappearing (58 to ~300) until they're fixed properly, one pattern at a time. Turn on "Debug: street graph" while driving to see it directly and report what still looks wrong</li>
+</ul>
+
 <h2>Version 1.10.3 (2026-07-16)</h2>
 <ul>
   <li>Fixed a crash that broke the entire site (blank page on load): widening the dangling-street snap tolerance in the last update exposed a pre-existing edge case that only showed up against the full map including Lévis - a street could end up referencing a piece of road that had already been replaced elsewhere, crashing before the map ever rendered. Verified fixed against the exact same data that crashed</li>
