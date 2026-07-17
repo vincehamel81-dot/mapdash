@@ -696,6 +696,20 @@ export function buildGraph(segments, {
   snapDanglingEndpoints(rawNodes, edges, dangleToleranceMeters)
   connectInteriorVertices(rawNodes, edges, VERTEX_PROXIMITY_TOLERANCE_METERS)
 
+  // Safety net: each of the three passes above replaces/deletes edges as it splits/merges nodes,
+  // updating the two nodes it directly knows about (an edge's own startKey/endKey) - but a node can
+  // also pick up a reference to an edge indirectly (snapDanglingEndpoints's direct-merge path pushes
+  // a dangling node's own edge onto a completely different target node's list). If that same edge
+  // object is independently split or deleted by another part of the same pass, that OTHER node's
+  // reference goes stale (or literal `undefined`, confirmed live crashing mergeNearbyNodes on the
+  // real wide-bbox + Lévis dataset - not reproducible against the tighter city-only dataset the
+  // audit script and local testing had been using, which is why this wasn't caught earlier). Rather
+  // than track down and patch every such cross-reference site individually under time pressure,
+  // this guarantees every node's edge list only ever contains edges that are still actually live.
+  for (const node of rawNodes.values()) {
+    node.edges = node.edges.filter((edge) => edge && edges.has(edge.id))
+  }
+
   const nodes = mergeNearbyNodes(rawNodes, toleranceMeters)
 
   // splitPolylineAtDistances (used by both splitCrossingEdges and snapDanglingEndpoints) can

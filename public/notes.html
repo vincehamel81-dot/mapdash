@@ -35,6 +35,11 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.10.3 (2026-07-16)</h2>
+<ul>
+  <li>Fixed a crash that broke the entire site (blank page on load): widening the dangling-street snap tolerance in the last update exposed a pre-existing edge case that only showed up against the full map including Lévis - a street could end up referencing a piece of road that had already been replaced elsewhere, crashing before the map ever rendered. Verified fixed against the exact same data that crashed</li>
+</ul>
+
 <h2>Version 1.10.2 (2026-07-16)</h2>
 <ul>
   <li>Widened how far a dead-end street will look for another nearby street to connect to (25m to 65m, tested directly against the real map data - real gaps go up to 60m, and going wider doesn't cause any new wrong turns elsewhere). Fixes 3 out of every 4 remaining "street stops short of where it should obviously continue" spots citywide (244 down to 60)</li>
