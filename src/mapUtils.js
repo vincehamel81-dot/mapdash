@@ -727,15 +727,32 @@ export function buildGraph(segments, {
   // Divided-road cleanup (see mergeShortNamedBridges/removeDuplicateEdges below) runs before the
   // existing collinear-chain simplification, so the two carriageways of a divided street are
   // already unified into one line by the time that pass looks for same-name chains to shorten.
-  // (A further pass to also drop the short self-loop-shaped edges this sometimes leaves behind -
-  // both endpoints landing on the same merged node - was tried and reverted: it measurably
-  // INCREASED the audit's missing-connections count, 199 -> 241, worse than the 199 baseline
-  // before touching any of this. Whatever real gap that was revealing wasn't worth chasing under
-  // time pressure - the bridge-merge + dedup pair alone already verified as a clean improvement
-  // (199 -> 195 missing connections, 802 -> 696 risky intersections), so left at that rather than
-  // risk a regression for a cosmetic residual few self-loop artifacts.)
   mergeShortNamedBridges(nodes, edges)
   removeDuplicateEdges(nodes, edges)
+
+  // A prior version of this also dropped the short self-loop-shaped edges these merges leave
+  // behind (both endpoints landing on the same merged node), then reverted it: the audit's
+  // missing-connections count went UP (199 -> 241), which looked like a regression under time
+  // pressure. Direct investigation (live report, Rue Jean-Marchand: 6 separate self-loops, all
+  // under 8m) plus a hard graph-reachability check settled it properly: a self-loop by
+  // construction only ever touches ONE node, so removing one can never disconnect it from a
+  // DIFFERENT node - confirmed by comparing BFS-reachable node counts with and without every
+  // self-loop in the real dataset (7261 either way, identical). The audit number moving wasn't a
+  // new problem, it was the audit's own "degree === 1 means dangling" heuristic getting fooled by
+  // a self-loop artificially inflating a node's edge count - the gap it revealed was real and
+  // pre-existing, just hidden. Capped at 100m (99th percentile of the ~2746 found is ~78m, and the
+  // 19 outliers above 100m - up to 660m - are left alone in case any are genuine loop-shaped
+  // streets/roundabouts rather than merge artifacts) since length itself doesn't affect safety, only
+  // the odds of accidentally deleting real content.
+  const MAX_SELF_LOOP_METERS = 100
+  for (const [id, edge] of Array.from(edges)) {
+    if (edge.startKey === edge.endKey && edge.lengthMeters < MAX_SELF_LOOP_METERS) {
+      edges.delete(id)
+      const node = nodes.get(edge.startKey)
+      if (node) node.edges = node.edges.filter((e) => e.id !== id)
+    }
+  }
+
   mergeCollinearSameNameEdges(nodes, edges)
 
   return { nodes, edges }
