@@ -35,6 +35,11 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.10.5 (2026-07-17)</h2>
+<ul>
+  <li>Re-added real intersection splitting where two streets' lines actually cross in space (highway ramps, X-intersections) - pure geometry, no guessing involved, so it can't invent a fake connection. Tested two other "should be safe" reconnection ideas (matching a dead-end to a nearby street's interior point; stitching a divided road's two carriageways back together) and both turned out to make things worse once measured properly, not better - so they're staying off for now rather than shipping something that just trades one kind of bad intersection for another. Net effect versus 1.10.4: about the same clean baseline (~316 flagged gaps, 89 confusing intersections), plus real X-crossings now connect. Still driving with the same official street data - see "Debug: street graph" to inspect it directly, and keep reporting spots that feel wrong so they can be fixed one at a time instead of with a blanket rule</li>
+</ul>
+
 <h2>Version 1.10.4 (2026-07-16)</h2>
 <ul>
   <li>Experimental: the street map now trusts the official Ville de Québec road data as-is instead of guessing which nearby streets should connect. That guessing (originally meant to close small gaps) was also inventing connections that don't exist in reality - like the fake "9-way" tangle inside highway interchanges, or streets like Côte d'Abraham appearing wrongly linked to Rue Olivier-Robitaille. Turning it off drops false/confusing intersections from ~579 to 89 citywide, at the cost of some real gaps reappearing (58 to ~300) until they're fixed properly, one pattern at a time. Turn on "Debug: street graph" while driving to see it directly and report what still looks wrong</li>

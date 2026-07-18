@@ -71,17 +71,18 @@ export function packageSegment(segment) {
   }
 }
 
-// Real street data is extracted per-named-street, not "noded" at every real intersection, so
-// two segments that physically meet often don't share an exact polyline endpoint. Merge nodes
-// that are within `toleranceMeters` of each other into one logical intersection so the movement
-// graph is actually navigable, using a grid-bucketed union-find to keep this fast at ~27k nodes.
-// Raised from 12m to 25m after two directly-reported "broken street" spots (visible gaps in the
-// debug overlay) both turned out to be genuine data gaps just above the old tolerance (13m and
-// 18m) - a city-wide scan found 1,244 more of the same pattern (same street name, two unmerged
-// node clusters within 25m of each other), not just the couple found by driving around. Tested
-// tolerance from 12-30m directly against the real data: gap count and the existing
-// findRiskyIntersections count both dropped monotonically the whole way with no reversal at any
-// step, so this isn't a tradeoff - 25m is where the scanned gaps hit zero.
+// UNUSED as of the false-connection investigation below (buildGraph now always calls
+// mergeNearbyNodes with 0, not this) - kept as a reference value only. This blanket distance-based
+// union-find is what was actually causing false connections between streets that don't really meet:
+// confirmed live (Rue Olivier-Robitaille reported wrongly linked to Côte d'Abraham, ~50m away in
+// reality) that it can transitively chain a sequence of pairwise-close-but-individually-distinct
+// real intersections into one artificial mega-node, since union-find merges are transitive (A~B and
+// B~C merges A/B/C together even if A and C are much farther apart than the tolerance alone would
+// suggest). The official street data is already ~98% connected via exact shared coordinates on its
+// own, so this kind of blanket merging isn't needed for the vast majority of the map - real gaps are
+// handled individually instead of by raising this back up. Original tuning history (12m -> 25m,
+// tested monotonic improvement against the real data with no reversal) kept below for reference in
+// case a future narrowly-scoped pass wants a starting value.
 const DEFAULT_NODE_MERGE_TOLERANCE_METERS = 25
 
 function createUnionFind(size) {
@@ -180,6 +181,13 @@ function mergeNearbyNodes(rawNodes, toleranceMeters) {
 // "not a tradeoff" shape as the 12m->25m tuning this constant already went through once. 65m is
 // where the gains flatten out hard (75m only found 2 more) and roughly matches the audit's own 60m
 // search window, so widening further wouldn't even be visible to it without changing that too.
+// UNUSED as of the false-connection investigation (buildGraph no longer calls snapDanglingEndpoints
+// at all) - kept as a reference value only. This wide-radius "snap the nearest dangling stub to
+// whatever's closest" matching is the confirmed mechanism behind a reported false connection (Côte
+// d'Abraham appearing linked to Rue Olivier-Robitaille, which don't actually touch in the source
+// data). The ~300 genuinely-dangling nodes left in the graph without this pass are a reviewable list
+// (`npm run audit:graph`) meant for individual, targeted fixes - not a blanket radius again. Tuning
+// history (25m -> 65m) kept below in case a future per-street pass wants a starting value.
 const INTERSECTION_SNAP_TOLERANCE_METERS = 65
 const VERTEX_GRID_CELL_METERS = 40
 
@@ -552,18 +560,16 @@ function snapDanglingEndpoints(rawNodes, edges, toleranceMeters) {
   }
 }
 
-// The gap neither splitCrossingEdges nor snapDanglingEndpoints covers: two DIFFERENT streets each
-// have an INTERIOR polyline vertex (not either street's own endpoint) sitting a few meters from
-// the other street's line, without the lines actually crossing (so it's not a true X-intersection)
-// and without either vertex being a dangling dead-end (so snapDanglingEndpoints never looks at it).
-// Confirmed against real reported cases (Rue Ferland / Rue Couillard) via direct data tracing: both
-// streets place a vertex at what a human would call "the intersection", just not close enough to
-// literally coincide - a very common shape for real-world street-network extractions where each
-// street was digitized independently. Tolerance is intentionally tighter than
-// INTERSECTION_SNAP_TOLERANCE_METERS since this pass considers every interior vertex of every edge
-// (not just already-dangling ones), so a looser tolerance risks false connections between distinct
-// parallel streets that merely run close together without truly meeting.
-const VERTEX_PROXIMITY_TOLERANCE_METERS = 10
+// UNUSED as of the false-connection investigation (buildGraph no longer calls
+// connectInteriorVertices) - kept as a reference value only. The gap this was meant to cover: two
+// DIFFERENT streets each have an INTERIOR polyline vertex (not either street's own endpoint)
+// sitting a few meters from the other street's line, without the lines actually crossing (not a
+// true X-intersection) and without either vertex being a dangling dead-end. Direct testing (after
+// fixing a real fragmentation bug in the function - see below) showed it's a wash at this tolerance
+// and actively harmful looser (see buildGraph's comment at the call site for numbers) - the official
+// dataset is apparently already well-noded enough that this finds almost nothing genuine. Kept
+// implemented, bug fixed, for a future targeted per-street pass.
+const VERTEX_PROXIMITY_TOLERANCE_METERS = 2
 
 function connectInteriorVertices(rawNodes, edges, toleranceMeters) {
   const edgeList = Array.from(edges.values())
@@ -600,8 +606,18 @@ function connectInteriorVertices(rawNodes, edges, toleranceMeters) {
       if (seenPairs.has(pairKey)) continue
       seenPairs.add(pairKey)
 
-      const nearCandidateStart = result.segmentIndex === 0 && result.t <= 1e-6
-      const nearCandidateEnd = result.segmentIndex === candidate.polyline.length - 2 && result.t >= 1 - 1e-6
+      // Prefer reusing the candidate's own existing endpoint node whenever the interior vertex is
+      // genuinely close to it, rather than only when the point-to-segment projection lands exactly
+      // at t=0/t=1 - a vertex near an endpoint but slightly off-axis (not perfectly collinear with
+      // the candidate's first/last leg) used to fail that strict check and mint a brand-new node
+      // right next to the real one, fragmenting one real intersection into two disconnected-but-
+      // nearby nodes (confirmed directly against the real data: 5 such fragmented pairs, each a
+      // real intersection silently split in two - previously masked by mergeNearbyNodes' old 25m
+      // tolerance re-stitching the fragments back together; exposed once that tolerance went to 0).
+      const distToCandidateStart = haversine(vertex, candidate.polyline[0])
+      const distToCandidateEnd = haversine(vertex, candidate.polyline[candidate.polyline.length - 1])
+      const nearCandidateStart = distToCandidateStart <= toleranceMeters && distToCandidateStart <= distToCandidateEnd
+      const nearCandidateEnd = distToCandidateEnd <= toleranceMeters && distToCandidateEnd < distToCandidateStart
       const nodeKey = nearCandidateStart ? candidate.startKey : nearCandidateEnd ? candidate.endKey : roundCoord(vertex)
 
       if (!cutsByEdge.has(edge.id)) cutsByEdge.set(edge.id, [])
@@ -667,18 +683,7 @@ function connectInteriorVertices(rawNodes, edges, toleranceMeters) {
   }
 }
 
-// TEMPORARY (v1.10.4 diagnostic build only): skip every tolerance/guess-based connectivity pass
-// and rely purely on the official dataset's own exact shared coordinates (already 99.6% connected
-// on its own - confirmed by direct investigation). Lets live playtesting with the debug graph
-// overlay show, from the root, which gaps are genuine and need a real fix vs which "gaps" the old
-// fuzzy passes were papering over while also inventing false connections elsewhere. Revert to
-// false once that review is done and a targeted (not blanket) reconnection strategy is chosen.
-const RAW_BASELINE_MODE = true
-
-export function buildGraph(segments, {
-  toleranceMeters = DEFAULT_NODE_MERGE_TOLERANCE_METERS,
-  dangleToleranceMeters = INTERSECTION_SNAP_TOLERANCE_METERS
-} = {}) {
+export function buildGraph(segments) {
   const rawNodes = new Map()
   const edges = new Map()
 
@@ -700,27 +705,44 @@ export function buildGraph(segments, {
     endNode.edges.push(edge)
   }
 
-  if (!RAW_BASELINE_MODE) {
-    splitCrossingEdges(rawNodes, edges)
-    snapDanglingEndpoints(rawNodes, edges, dangleToleranceMeters)
-    connectInteriorVertices(rawNodes, edges, VERTEX_PROXIMITY_TOLERANCE_METERS)
-  }
+  // snapDanglingEndpoints (wide-radius "snap to whatever's nearest" fuzzy matching) is deliberately
+  // NOT called here - confirmed as the actual mechanism behind a reported false connection (Côte
+  // d'Abraham appearing linked to Rue Olivier-Robitaille, which don't touch in the source data at
+  // all). splitCrossingEdges is the one pass that's actually pure geometry (two lines mathematically
+  // cross, no tolerance) - directly measured against the audit as a clean no-risk no-op-or-better
+  // (missing-connections 315 -> 316, risky intersections 89 -> 89, i.e. true unnoded crossings are
+  // rare in this dataset but the pass costs nothing when they're not there).
+  splitCrossingEdges(rawNodes, edges)
 
-  // Safety net: each of the three passes above replaces/deletes edges as it splits/merges nodes,
-  // updating the two nodes it directly knows about (an edge's own startKey/endKey) - but a node can
-  // also pick up a reference to an edge indirectly (snapDanglingEndpoints's direct-merge path pushes
-  // a dangling node's own edge onto a completely different target node's list). If that same edge
-  // object is independently split or deleted by another part of the same pass, that OTHER node's
-  // reference goes stale (or literal `undefined`, confirmed live crashing mergeNearbyNodes on the
-  // real wide-bbox + Lévis dataset - not reproducible against the tighter city-only dataset the
-  // audit script and local testing had been using, which is why this wasn't caught earlier). Rather
-  // than track down and patch every such cross-reference site individually under time pressure,
-  // this guarantees every node's edge list only ever contains edges that are still actually live.
+  // connectInteriorVertices (T-intersection matching against a nearby edge's interior vertices) is
+  // NOT called here, despite looking narrowly-scoped on paper. Measured directly against the audit
+  // (after fixing a real fragmentation bug in it - see the function itself): even at the tightest
+  // useful tolerance (1-2m) it's a wash (missing-connections 330 -> 331, risky 151 -> 152), and it
+  // gets sharply worse from there (10m: risky 151 -> 759, worse than the ORIGINAL pre-investigation
+  // number). The official dataset is apparently already so well-noded that this pass finds almost
+  // nothing genuine to fix and mostly just creates new near-tied-angle ambiguity. Left implemented
+  // (with its fragmentation bug fixed) for a future per-street targeted pass, not blanket use.
+
+  // Safety net: splitCrossingEdges/connectInteriorVertices replace/delete edges as they split nodes,
+  // updating the two nodes they directly know about (an edge's own startKey/endKey) - but a node can
+  // also pick up a reference to an edge indirectly elsewhere in the same pass. If that same edge
+  // object is independently split or deleted, that OTHER node's reference goes stale (or literal
+  // `undefined` - this exact shape crashed mergeNearbyNodes live on the wide-bbox + Lévis dataset when
+  // snapDanglingEndpoints's now-disabled direct-merge path was still doing this too). Cheap to keep as
+  // a blanket guarantee rather than re-audit every cross-reference site by hand each time one of these
+  // passes changes.
   for (const node of rawNodes.values()) {
     node.edges = node.edges.filter((edge) => edge && edges.has(edge.id))
   }
 
-  const nodes = mergeNearbyNodes(rawNodes, RAW_BASELINE_MODE ? 0 : toleranceMeters)
+  // toleranceMeters is 0 here deliberately, not a leftover default - mergeNearbyNodes' blanket
+  // distance-based union-find is what caused the false-connection bug (transitive chaining through a
+  // street's own closely-spaced vertices, e.g. Rue Olivier-Robitaille ending up merged with Côte
+  // d'Abraham through Rue Saint-Réal). The official dataset is already ~98% connected via exact
+  // shared coordinates on its own (confirmed by direct investigation), so this call now only exists to
+  // keep the raw-nodes-to-merged-nodes shape consistent for the rest of the pipeline, not to merge
+  // anything a real distance tolerance would find.
+  const nodes = mergeNearbyNodes(rawNodes, 0)
 
   // splitPolylineAtDistances (used by both splitCrossingEdges and snapDanglingEndpoints) can
   // itself introduce a duplicate leading/trailing point when a cut falls exactly on - or very
@@ -754,10 +776,15 @@ export function buildGraph(segments, {
     node.edges = node.edges.filter((edge) => edge.lengthMeters >= MIN_EDGE_LENGTH_METERS)
   }
 
-  // Divided-road cleanup (see mergeShortNamedBridges/removeDuplicateEdges below) runs before the
-  // existing collinear-chain simplification, so the two carriageways of a divided street are
-  // already unified into one line by the time that pass looks for same-name chains to shorten.
-  if (!RAW_BASELINE_MODE) mergeShortNamedBridges(nodes, edges)
+  // mergeShortNamedBridges (collapse a short same-named connector between two already-multiply-
+  // connected clusters - meant for a divided road's two carriageways reconverging) is NOT called
+  // here. It looked narrowly-scoped (name + length, not raw distance) but measured directly against
+  // the audit as clearly net-negative on its own: missing-connections 316 -> 330, risky
+  // intersections 89 -> 151, with splitCrossingEdges already accounted for in both numbers. The
+  // <25m/both-ends-already-connected heuristic apparently also fires on real, correct short blocks
+  // in dense grid neighborhoods (not just genuine divided-road bridges), incorrectly merging two
+  // distinct real intersections into one. Left implemented for a future per-street targeted pass
+  // (confirmed divided roads only), not blanket use.
   removeDuplicateEdges(nodes, edges)
 
   // A prior version of this also dropped the short self-loop-shaped edges these merges leave
