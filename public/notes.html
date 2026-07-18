@@ -35,6 +35,16 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.10.14 (2026-07-18)</h2>
+<ul>
+  <li>Fixed a second bug at the same spot as the last turn-signal fix (Boulevard Père-Lelièvre / Boulevard Central): flashing left there kept going straight instead of taking the exit, because that exit sits at a very shallow angle and the fix meant to ignore "basically straight" candidates was ignoring it too, even though it's a genuinely different street. Now that rule only applies to a street continuing under its own name - a different street is always treated as a real option, no matter how shallow the angle</li>
+</ul>
+
+<h2>Version 1.10.13 (2026-07-18)</h2>
+<ul>
+  <li>Mobile: replaced the 4-button D-pad with a fixed-position joystick (bottom-left) - drag diagonally to go, say, forward-and-left at once, instead of needing to hold two separate touch buttons together</li>
+</ul>
+
 <h2>Version 1.10.12 (2026-07-18)</h2>
 <ul>
   <li>Fixed a real bug behind "sometimes I go forward, sometimes I turn back on myself" at the same spot pressing the same key. Root cause: turn signals had no limit on how sharp a turn they'd accept - at a curved street re-entered from either of two directions, "right" could sometimes mean a normal continuation and sometimes mean a near-total U-turn onto a different street, since both technically matched "right" by angle. A turn signal now never selects something that extreme unless it's genuinely the only option (a real dead end)</li>

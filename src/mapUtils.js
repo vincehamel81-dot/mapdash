@@ -1148,14 +1148,20 @@ export function chooseNextSegment(graph, nodeKey, currentEdge, currentHeadingDeg
         //    (confirmed live: Bretelle Boul. Père-Lelièvre, Sortie 8 forking into itself plus a bus
         //    service road - pressing right needed to reach the OTHER Bretelle branch, not the bus
         //    road, but the fix as first shipped could never reach it).
-        // So: drop candidates too close to dead-straight to be a real option (regardless of name),
-        // then let the signed angle - not the name - decide among whatever's left. Raw angle sign
-        // is noisy at these shallow angles (the Henri-IV ramp is numerically a hair "left" of
-        // straight despite being the correct answer for a right signal), but once the nearly-
-        // straight options are already gone, comparing what's left against each other is reliable
-        // enough to tell two real branches apart.
+        // So: drop SAME-NAMED candidates too close to dead-straight to be a real option, then let
+        // the signed angle - not the name - decide among whatever's left. Raw angle sign is noisy
+        // at these shallow angles (the Henri-IV ramp is numerically a hair "left" of straight
+        // despite being the correct answer for a right signal), but once the nearly-straight
+        // same-named options are already gone, comparing what's left against each other is reliable
+        // enough to tell two real branches apart. Critically, the negligible-angle exclusion must
+        // stay scoped to SAME-named candidates only - confirmed live as a real bug (Boulevard
+        // Père-Lelièvre/Boulevard Central) when applied to every candidate regardless of name: a
+        // genuinely different street (Central) sitting at a shallow +3deg got excluded as
+        // "negligible" too, even though a different name always means a real, distinct destination
+        // no matter how shallow its angle - only a SAME-named candidate can ever be "just
+        // continuing" in a way that's not a real alternative.
         const NEGLIGIBLE_ANGLE_DEG = 3
-        const real = pool.filter((choice) => choice.absAngle > NEGLIGIBLE_ANGLE_DEG)
+        const real = pool.filter((choice) => choice.edge.name !== currentEdge.name || choice.absAngle > NEGLIGIBLE_ANGLE_DEG)
         const finalPool = real.length ? real : pool
         filtered = [finalPool.slice().sort((a, b) => b.angleDelta * sign - a.angleDelta * sign)[0]]
       }

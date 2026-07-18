@@ -885,6 +885,84 @@ function useDrivingControls(started, onControlsChange, onZoomChange, onReverseTa
   return { setTouchControl }
 }
 
+// Deadzone before any direction registers, as a fraction of the joystick base's radius - without
+// this, a finger that's merely resting near center (not a deliberate push) would flicker a
+// direction on and off from sub-pixel jitter.
+const JOYSTICK_DEADZONE_RATIO = 0.2
+
+// Decomposes a drag vector into the same four booleans the old D-pad's separate buttons used to
+// set independently - 0deg is straight up (forward), measured clockwise, with each direction's
+// range wide enough (135deg) to overlap its neighbors by 45deg on each side, so a diagonal drag
+// naturally sets two booleans at once (e.g. up-and-left sets both forward and left), matching
+// exactly what holding W+A together already does on keyboard.
+function joystickVectorToControls(dx, dy, maxRadius) {
+  if (Math.hypot(dx, dy) < maxRadius * JOYSTICK_DEADZONE_RATIO) {
+    return { forward: false, left: false, right: false, backward: false }
+  }
+  const angle = (Math.atan2(dx, -dy) * 180) / Math.PI // -180..180, 0=up, 90=right, -90=left, +-180=down
+  return {
+    forward: angle > -67.5 && angle < 67.5,
+    right: angle > 22.5 && angle < 157.5,
+    backward: angle > 112.5 || angle < -112.5,
+    left: angle > -157.5 && angle < -22.5
+  }
+}
+
+// Fixed-position virtual joystick, replacing the old 4-button D-pad (see joystickVectorToControls
+// above) - direct request, after two adjacent physical buttons proved awkward to hold at once with
+// touch (unlike keyboard's independent keydown events, which already supported forward+left held
+// together fine). Reuses the exact same onControl/setTouchControl plumbing the D-pad called, so
+// none of the actual driving/movement logic needed to change - this is a new INPUT method for the
+// same four booleans, not a new control scheme. Fixed bottom-left (not a "floating" joystick that
+// appears wherever first touched) by direct request, for a predictable, learnable thumb position.
+function TouchJoystick({ onControl }) {
+  const baseRef = useRef(null)
+  const stateRef = useRef({ forward: false, left: false, right: false, backward: false })
+  const [nubOffset, setNubOffset] = useState({ x: 0, y: 0 })
+
+  const applyControls = useCallback((next) => {
+    const prev = stateRef.current
+    for (const key of ['forward', 'left', 'right', 'backward']) {
+      if (prev[key] !== next[key]) onControl(key, next[key])
+    }
+    stateRef.current = next
+  }, [onControl])
+
+  const reset = useCallback(() => {
+    applyControls({ forward: false, left: false, right: false, backward: false })
+    setNubOffset({ x: 0, y: 0 })
+  }, [applyControls])
+
+  const handleMove = useCallback((clientX, clientY) => {
+    const base = baseRef.current
+    if (!base) return
+    const rect = base.getBoundingClientRect()
+    const dx = clientX - (rect.left + rect.width / 2)
+    const dy = clientY - (rect.top + rect.height / 2)
+    const maxRadius = rect.width / 2
+    const dist = Math.hypot(dx, dy)
+    const clampScale = dist > maxRadius ? maxRadius / dist : 1
+    setNubOffset({ x: dx * clampScale, y: dy * clampScale })
+    applyControls(joystickVectorToControls(dx, dy, maxRadius))
+  }, [applyControls])
+
+  return (
+    <div
+      ref={baseRef}
+      className="touch-joystick-base"
+      // Pointer capture (not onPointerLeave) is what keeps a drag tracking correctly once the
+      // finger slides outside the base circle's own bounds - the captured pointer's move/up events
+      // keep targeting this element regardless of where on screen the finger actually is.
+      onPointerDown={(e) => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); handleMove(e.clientX, e.clientY) }}
+      onPointerMove={(e) => handleMove(e.clientX, e.clientY)}
+      onPointerUp={reset}
+      onPointerCancel={reset}
+    >
+      <div className="touch-joystick-nub" style={{ transform: `translate(${nubOffset.x}px, ${nubOffset.y}px)` }} />
+    </div>
+  )
+}
+
 // On-screen equivalent of WASD/Shift, CSS-hidden above the mobile breakpoint (see App.css) - built
 // as its own component so its pointer-event wiring stays in one place, and so its onControl calls
 // go straight through useDrivingControls' own setTouchControl (see above), never touching
@@ -901,12 +979,7 @@ function TouchControls({ onControl }) {
   })
   return (
     <div className="touch-controls">
-      <div className="touch-dpad">
-        <button className="touch-btn touch-btn-up" {...bind('forward')}>▲</button>
-        <button className="touch-btn touch-btn-left" {...bind('left')}>◀</button>
-        <button className="touch-btn touch-btn-right" {...bind('right')}>▶</button>
-        <button className="touch-btn touch-btn-down" {...bind('backward')}>▼</button>
-      </div>
+      <TouchJoystick onControl={onControl} />
       <button className="touch-btn touch-btn-turbo" {...bind('turbo')}>⚡</button>
     </div>
   )

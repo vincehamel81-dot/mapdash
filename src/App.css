@@ -1406,24 +1406,53 @@ body, html, #root {
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
   }
 
-  /* On-screen WASD/Shift equivalent (see TouchControls in App.jsx). D-pad bottom-left for
-     thumb reach, Turbo isolated bottom-right so it can never be fat-fingered by a steering tap -
-     both sit above .overlay-bottom-left's speed pill and clear of .chat-panel's bottom-right
-     corner (18px/56px tall). touch-action:none stops the browser's own scroll/pinch gestures from
-     eating the pointer events these buttons need; user-select:none stops long-press text selection. */
+  /* On-screen WASD/Shift equivalent (see TouchControls/TouchJoystick in App.jsx). Joystick
+     bottom-left for thumb reach, Turbo isolated bottom-right so it can never be fat-fingered by a
+     steering drag - both sit above .overlay-bottom-left's speed pill and clear of .chat-panel's
+     bottom-right corner (18px/56px tall). touch-action:none stops the browser's own scroll/pinch
+     gestures from eating the pointer events these need; user-select:none stops long-press text
+     selection. */
   .touch-controls {
     display: block;
   }
 
-  .touch-dpad {
+  /* Fixed size/position (not "however big the drag turns out to be") so joystickVectorToControls'
+     own maxRadius (read from this element's actual rendered width via getBoundingClientRect) stays
+     predictable - same footprint as the old 3x3 D-pad grid it replaced (~172px). */
+  .touch-joystick-base {
     position: fixed;
     left: 14px;
-    bottom: 90px;
+    bottom: 74px;
     z-index: 1930;
-    display: grid;
-    grid-template-columns: 56px 56px 56px;
-    grid-template-rows: 56px 56px 56px;
-    gap: 4px;
+    width: 132px;
+    height: 132px;
+    border-radius: 999px;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    background: rgba(255, 255, 255, 0.55);
+    border: 2px solid rgba(255, 255, 255, 0.85);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .touch-joystick-nub {
+    width: 56px;
+    height: 56px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.92);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+    /* transform is set inline per-frame (drag offset) - transition only smooths the snap-back to
+       center on release, not the drag itself (which would otherwise lag behind the finger). */
+    transition: transform 0.15s ease-out;
+    pointer-events: none;
+  }
+
+  .touch-joystick-base:active .touch-joystick-nub {
+    transition: none;
+    background: rgba(26, 115, 232, 0.9);
   }
 
   .touch-btn {
@@ -1445,11 +1474,6 @@ body, html, #root {
     background: rgba(26, 115, 232, 0.9);
     color: #ffffff;
   }
-
-  .touch-btn-up { grid-column: 2; grid-row: 1; }
-  .touch-btn-left { grid-column: 1; grid-row: 2; }
-  .touch-btn-right { grid-column: 3; grid-row: 2; }
-  .touch-btn-down { grid-column: 2; grid-row: 3; }
 
   .touch-btn-turbo {
     position: fixed;
