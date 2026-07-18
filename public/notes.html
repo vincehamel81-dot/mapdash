@@ -35,6 +35,11 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.10.9 (2026-07-17)</h2>
+<ul>
+  <li>Scaled the debug markers back down to what's actually reviewable: they now only show up in tight-bbox modes (Survival, Tag, Finder, etc.) where the count matches the ~300 real list, instead of Single/Team's much bigger map (Québec + Lévis) which was showing thousands. Also dropped the shallow-fork markers from the live overlay entirely - the turn-signal fix already covers all of them generically, so they were never meant for one-by-one checking. Bumped marker size/contrast for readability</li>
+</ul>
+
 <h2>Version 1.10.8 (2026-07-17)</h2>
 <ul>
   <li>Fixed severe lag introduced by the previous update's debug markers - driving with "Debug: street graph" on was nearly unplayable. Root cause: each numbered marker was re-positioning itself on every single frame of driving (thousands of them, ~4700 on the full map), not just when actually needed. The colored dots now render as one cheap map layer instead, and the numbered labels only exist for whatever's currently on-screen (refreshed a few times a second, not every frame) - same information, no lag</li>

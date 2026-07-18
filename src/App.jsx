@@ -23,7 +23,6 @@ import {
   haversine,
   pickRandomStreetPoint,
   findRiskyIntersections,
-  findShallowForks,
   findMissingConnections,
   pickRandomNextSegment,
   pickStraightBiasedNextSegment,
@@ -436,6 +435,15 @@ function graphEdgesToGeoJSON(graph) {
     }))
   }
 }
+
+// Debug-issue markers manually reviewed and confirmed as not worth showing anymore (a real dead-
+// end, a false positive, or already fixed) - keyed by exactly the label shown on the marker
+// ("missing12" for M12, "risky4" for R4), matching how they'll actually get reported back. Numbers
+// are assigned before this filter runs (see debugIssuePoints), so adding an entry here only removes
+// that one marker - it never shifts any other marker's number. Safe to keep growing this list
+// freely; only reset/renumber if the underlying graph-building logic itself changes.
+const DISMISSED_DEBUG_ISSUES = new Set([
+])
 
 function debugIssuePointsToGeoJSON(points) {
   return {
@@ -1165,8 +1173,8 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
     })
     // Debug overlay ("Debug: street graph" checkbox) - draws every edge the car can actually
     // drive on, Pac-Man-maze-wall style, plus a colored dot for every flagged issue (missing
-    // connections, risky intersections, shallow forks - see findMissingConnections/
-    // findRiskyIntersections/findShallowForks in mapUtils.js). The dots are a plain GeoJSON circle
+    // connections, risky intersections - tight-bbox modes only, see findMissingConnections/
+    // findRiskyIntersections in mapUtils.js). The dots are a plain GeoJSON circle
     // layer (GPU-rendered, near-zero per-frame cost) rather than one maplibregl.Marker per point -
     // a first attempt used one Marker each, which was fine for the handful of car/player markers
     // this app normally has, but each Marker re-subscribes to the map's own 'move' event to keep
@@ -1762,34 +1770,29 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
     setGraph(builtGraph)
   }, [rawSegments, wideBboxMode])
 
-  // The other two debug-issue lists (findRiskyIntersections is computed further up already) - bbox
-  // must match whichever the graph above was actually built against, or the "near the edge of the
-  // map, not a real gap" exclusion in findMissingConnections won't line up.
-  const activeBbox = wideBboxMode ? CONFIG.bboxWide : CONFIG.bbox
+  // Debug-issue markers only cover the tight Québec-only scope (missing-connections/risky-
+  // intersections are ~316/89 there, matching `npm run audit:graph`'s numbers) - Single/Team's wide
+  // bbox (+ Lévis + enclaves) triples the dataset and turns this into thousands of markers, which
+  // isn't reviewable one at a time (confirmed live: overwhelming, not what was expected). Rather
+  // than scope just the exclusion check to the tight box while still scanning the wide graph's
+  // nodes, skip the whole thing outright in wide mode - review in a tight-bbox mode instead.
   const missingConnections = useMemo(
-    () => (graph ? findMissingConnections(graph, { bbox: activeBbox }) : []),
-    [graph, activeBbox]
+    () => (graph && !wideBboxMode ? findMissingConnections(graph, { bbox: CONFIG.bbox }) : []),
+    [graph, wideBboxMode]
   )
-  // findShallowForks reports both directions of every fork (entering A, forking onto B - and
-  // separately entering B, forking onto A) since each is a genuinely different turn-signal
-  // scenario for chooseNextSegment - but they're the same physical spot to a human scanning the
-  // map, so dedupe by the unordered name pair + coordinate before numbering.
-  const shallowForks = useMemo(() => {
-    if (!graph) return []
-    const seen = new Set()
-    const deduped = []
-    for (const f of findShallowForks(graph)) {
-      const key = `${[f.streetName, f.forkName].sort().join('|')}@${f.coord[0].toFixed(5)},${f.coord[1].toFixed(5)}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      deduped.push(f)
-    }
-    return deduped
-  }, [graph])
 
   // One flat, numbered list backing both the GPU dot layer and the on-screen labels below - built
-  // once per graph/list change, not per render.
+  // once per graph/list change, not per render. Deliberately does NOT include shallow forks
+  // (findShallowForks) - that list is dominated by harmless same-angle street-name-changes (most
+  // fork at 0-2deg with nothing ambiguous about them) and the turn-signal fix already handles all of
+  // them generically, so it was never meant for one-by-one review - it stays available via
+  // `npm run audit:graph`'s geojson output for spot-checking, not as a live in-game marker set.
+  //
+  // Numbers are assigned here, BEFORE the DISMISSED_DEBUG_ISSUES filter below - so manually
+  // reviewed spots can be dropped from the list (fewer markers left to check) without ever
+  // reshuffling any other marker's number.
   const debugIssuePoints = useMemo(() => {
+    if (wideBboxMode) return []
     const points = []
     missingConnections.forEach((m, i) => points.push({
       type: 'missing', num: i + 1, coord: m.coord,
@@ -1799,12 +1802,8 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
       type: 'risky', num: i + 1, coord: r.coord,
       title: `On "${r.streetName}", going straight can wrongly divert onto "${r.divertsToName}"`
     }))
-    shallowForks.forEach((f, i) => points.push({
-      type: 'shallow', num: i + 1, coord: f.coord,
-      title: `On "${f.streetName}", "${f.forkName}" forks off just ${Math.abs(f.angleDeg)}deg away`
-    }))
-    return points
-  }, [missingConnections, riskyIntersections, shallowForks])
+    return points.filter((p) => !DISMISSED_DEBUG_ISSUES.has(`${p.type}${p.num}`))
+  }, [missingConnections, riskyIntersections])
 
   useEffect(() => {
     if (!mapReady) return

@@ -757,24 +757,27 @@
   color: inherit;
 }
 
-/* Numbered debug-issue markers (missing connections / risky intersections / shallow forks) - see
-   the debug-issue-markers effect in App.jsx. Small enough that a dense cluster (a busy interchange
-   can have a dozen) doesn't obscure the streets underneath; the number + hover title (native
-   browser tooltip) carry the actual detail. */
+/* Numbered debug-issue markers (missing connections / risky intersections) - see the
+   debug-issue-markers effect in App.jsx. Sized to stay legible with a 3-digit number (the tight-
+   bbox scope this now covers tops out around 316) - a dark outline (not white) around a white
+   number is what actually keeps it readable over the map's own light street-name halos, which a
+   plain white border blended into (confirmed live: "white on white"). */
 .debug-issue-marker {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  border: 2px solid #ffffff;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 3px;
+  border-radius: 11px;
+  border: 1.5px solid rgba(0, 0, 0, 0.55);
   color: #ffffff;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   font-family: inherit;
   cursor: default;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
 }
 
 .debug-issue-marker--missing {
@@ -783,10 +786,6 @@
 
 .debug-issue-marker--risky {
   background: #ff1744;
-}
-
-.debug-issue-marker--shallow {
-  background: #7c4dff;
 }
 
 .spectator-list {
