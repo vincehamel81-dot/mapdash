@@ -997,6 +997,11 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
   const [rawSegments, setRawSegments] = useState(null)
   const [segments, setSegments] = useState([])
   const [graph, setGraph] = useState(null)
+  // Always the tight Québec-only graph, independent of the current mode's gameplay graph -
+  // backs the debug-issue markers (see the effect further down) so their numbering stays the
+  // manageable ~316/89 scope regardless of whether Single/Team's much bigger wide-bbox graph is
+  // what's actually being driven on right now.
+  const [debugIssueGraph, setDebugIssueGraph] = useState(null)
   const graphCacheRef = useRef({})
   const [currentEdgeId, setCurrentEdgeId] = useState(null)
   const [activeStreet, setActiveStreet] = useState('Rue inconnue')
@@ -1545,7 +1550,7 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
   const leaveRoomRef = useRef(null)
 
   const currentSegment = useMemo(() => graph?.edges.get(currentEdgeId) || null, [graph, currentEdgeId])
-  const riskyIntersections = useMemo(() => (graph ? findRiskyIntersections(graph) : []), [graph])
+  const riskyIntersections = useMemo(() => (debugIssueGraph ? findRiskyIntersections(debugIssueGraph) : []), [debugIssueGraph])
 
   useEffect(() => {
     if (!mapReady) return
@@ -1745,40 +1750,48 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
 
   const wideBboxMode = Boolean(MODE_CONFIG[mode]?.wideBbox)
 
+  const buildCachedGraph = useCallback((cacheKey, box, allowedCities) => {
+    const cached = graphCacheRef.current[cacheKey]
+    if (cached) return cached
+    const withinBbox = (poly) => poly.every(([lat, lng]) => lat >= box.south && lat <= box.north && lng >= box.west && lng <= box.east)
+    const filtered = rawSegments.filter((s) => allowedCities.includes(s.city) && withinBbox(s.polyline))
+    const built = { segments: filtered, graph: buildGraph(filtered) }
+    graphCacheRef.current[cacheKey] = built
+    return built
+  }, [rawSegments])
+
   useEffect(() => {
     if (!rawSegments) return
     // Two bbox variants share one raw fetch: the tight curated box (most modes, Québec + enclaves)
     // and the wide full-region box (Single/Team, see MODE_CONFIG - Québec + Lévis + enclaves).
     // Each is filtered+built once and cached here - switching modes back and forth in the setup
     // screen shouldn't rebuild a 20k+ segment graph every time.
-    const cacheKey = wideBboxMode ? 'wide' : 'tight'
-    const cached = graphCacheRef.current[cacheKey]
-    if (cached) {
-      setSegments(cached.segments)
-      setGraph(cached.graph)
-      return
-    }
-    const box = wideBboxMode ? CONFIG.bboxWide : CONFIG.bbox
-    const withinBbox = (poly) => poly.every(([lat, lng]) => lat >= box.south && lat <= box.north && lng >= box.west && lng <= box.east)
-    const allowedCities = wideBboxMode
-      ? ['Québec', 'Lévis', "L'Ancienne-Lorette", 'Wendake']
-      : ['Québec', "L'Ancienne-Lorette", 'Wendake']
-    const filtered = rawSegments.filter((s) => allowedCities.includes(s.city) && withinBbox(s.polyline))
-    const builtGraph = buildGraph(filtered)
-    graphCacheRef.current[cacheKey] = { segments: filtered, graph: builtGraph }
-    setSegments(filtered)
-    setGraph(builtGraph)
-  }, [rawSegments, wideBboxMode])
+    const cached = wideBboxMode
+      ? buildCachedGraph('wide', CONFIG.bboxWide, ['Québec', 'Lévis', "L'Ancienne-Lorette", 'Wendake'])
+      : buildCachedGraph('tight', CONFIG.bbox, ['Québec', "L'Ancienne-Lorette", 'Wendake'])
+    setSegments(cached.segments)
+    setGraph(cached.graph)
+  }, [rawSegments, wideBboxMode, buildCachedGraph])
 
-  // Debug-issue markers only cover the tight Québec-only scope (missing-connections/risky-
-  // intersections are ~316/89 there, matching `npm run audit:graph`'s numbers) - Single/Team's wide
-  // bbox (+ Lévis + enclaves) triples the dataset and turns this into thousands of markers, which
-  // isn't reviewable one at a time (confirmed live: overwhelming, not what was expected). Rather
-  // than scope just the exclusion check to the tight box while still scanning the wide graph's
-  // nodes, skip the whole thing outright in wide mode - review in a tight-bbox mode instead.
+  // Debug-issue markers (see below) always use this graph regardless of the current mode - built
+  // here unconditionally so it's ready even if the player never actually visits a tight-bbox mode
+  // this session (e.g. going straight to Single, per direct request: "put some numbers available
+  // in single, even for the finder bbox"). Deliberately Québec-only (not the 3-city list the real
+  // tight-bbox gameplay graph uses) to exactly match `npm run audit:graph`'s own scope - the two
+  // small enclaves it excludes were adding ~130 extra never-reported-as-316 spots to the numbering.
+  useEffect(() => {
+    if (!rawSegments) return
+    setDebugIssueGraph(buildCachedGraph('debugIssues', CONFIG.bbox, ['Québec']).graph)
+  }, [rawSegments, buildCachedGraph])
+
+  // Always computed against the tight debugIssueGraph (~316 spots), not the current mode's
+  // gameplay graph - shows the same manageable, reviewable list whether currently playing in a
+  // tight-bbox mode or Single/Team's much bigger one (direct request: markers should be visible in
+  // Single too, not just tight-bbox modes - Single's map is a superset area, so every tight-bbox
+  // marker still falls somewhere on it).
   const missingConnections = useMemo(
-    () => (graph && !wideBboxMode ? findMissingConnections(graph, { bbox: CONFIG.bbox }) : []),
-    [graph, wideBboxMode]
+    () => (debugIssueGraph ? findMissingConnections(debugIssueGraph, { bbox: CONFIG.bbox }) : []),
+    [debugIssueGraph]
   )
 
   // One flat, numbered list backing both the GPU dot layer and the on-screen labels below - built
@@ -1792,7 +1805,6 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
   // reviewed spots can be dropped from the list (fewer markers left to check) without ever
   // reshuffling any other marker's number.
   const debugIssuePoints = useMemo(() => {
-    if (wideBboxMode) return []
     const points = []
     missingConnections.forEach((m, i) => points.push({
       type: 'missing', num: i + 1, coord: m.coord,
