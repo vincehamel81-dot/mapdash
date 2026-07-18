@@ -1118,8 +1118,16 @@ export function chooseNextSegment(graph, nodeKey, currentEdge, currentHeadingDeg
       // ignored if EVERY candidate is beyond it (a genuine dead-end/hairpin with nothing else to
       // pick) - matches the same "don't invent a wrong choice, but don't strand a real dead end
       // either" shape as SAME_STREET_CONTINUE_MAX_ANGLE_DEG below.
+      //
+      // Checked against absAngle (unsigned), NOT angleDelta*sign - confirmed live as a second real
+      // bug at a different node in the same interchange: a candidate at delta=-172 for a LEFT press
+      // (sign=+1) gives angleDelta*sign=-172, which trivially satisfies "<=150" since nothing
+      // bounded the negative side. The signed check only ever caught a reversal when the sign
+      // happened to make it a large POSITIVE number - the mirror case (large negative) sailed
+      // through untouched, so the exact same "spin 180 and come back" bug survived under the
+      // opposite sign combination. A reversal is a reversal regardless of which sign it lands on.
       const MAX_TURN_ANGLE_DEG = 150
-      const plausible = choices.filter((choice) => choice.angleDelta * sign <= MAX_TURN_ANGLE_DEG)
+      const plausible = choices.filter((choice) => choice.absAngle <= MAX_TURN_ANGLE_DEG)
       const pool = plausible.length ? plausible : choices
 
       const directional = pool.filter((choice) => choice.angleDelta * sign > 10)

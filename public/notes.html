@@ -35,6 +35,11 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.10.15 (2026-07-18)</h2>
+<ul>
+  <li>Fixed the "spin 180° and come back" turn-signal bug surviving at some highway interchanges even after the earlier fix. The earlier fix only blocked a near-total-reversal candidate when it happened to land on one particular side of the math - the mirror case (same kind of reversal, opposite sign) slipped through untouched. Now blocked either way, root-caused from a live report at the Autoroute Robert-Bourassa interchange</li>
+</ul>
+
 <h2>Version 1.10.14 (2026-07-18)</h2>
 <ul>
   <li>Fixed a second bug at the same spot as the last turn-signal fix (Boulevard Père-Lelièvre / Boulevard Central): flashing left there kept going straight instead of taking the exit, because that exit sits at a very shallow angle and the fix meant to ignore "basically straight" candidates was ignoring it too, even though it's a genuinely different street. Now that rule only applies to a street continuing under its own name - a different street is always treated as a real option, no matter how shallow the angle</li>
