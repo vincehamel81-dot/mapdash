@@ -35,6 +35,11 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.10.8 (2026-07-17)</h2>
+<ul>
+  <li>Fixed severe lag introduced by the previous update's debug markers - driving with "Debug: street graph" on was nearly unplayable. Root cause: each numbered marker was re-positioning itself on every single frame of driving (thousands of them, ~4700 on the full map), not just when actually needed. The colored dots now render as one cheap map layer instead, and the numbered labels only exist for whatever's currently on-screen (refreshed a few times a second, not every frame) - same information, no lag</li>
+</ul>
+
 <h2>Version 1.10.7 (2026-07-17)</h2>
 <ul>
   <li>Debug overlay now shows numbered markers for every flagged spot (missing connections in orange, risky intersections in red, shallow forks in purple), so they can be checked one at a time and reported by number instead of by description. Hover a marker for details. Turn on "Debug: street graph" to see them</li>

@@ -437,6 +437,17 @@ function graphEdgesToGeoJSON(graph) {
   }
 }
 
+function debugIssuePointsToGeoJSON(points) {
+  return {
+    type: 'FeatureCollection',
+    features: (points || []).map((p) => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [p.coord[1], p.coord[0]] },
+      properties: { type: p.type, num: p.num }
+    }))
+  }
+}
+
 // Deterministic per-cloud PRNG (mulberry32) seeded from the cloud's own id, so its blob shape
 // stays stable across re-renders/drift instead of re-randomizing (and thus visibly flickering)
 // every time cloud state updates.
@@ -1045,7 +1056,7 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
   const carMarkerRef = useRef(null)
   const carMarkerElRef = useRef(null)
   const spawnMarkerRef = useRef(null)
-  const debugIssueMarkersRef = useRef([])
+  const debugIssueMarkersRef = useRef(new Map())
   const compassRef = useRef(null)
   const northUpModeRef = useRef(false)
   const activeZoomGestureRef = useRef(false)
@@ -1153,12 +1164,18 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
       paint: { 'line-color': '#e53935', 'line-width': 3, 'line-dasharray': [2, 2], 'line-opacity': 0.85 }
     })
     // Debug overlay ("Debug: street graph" checkbox) - draws every edge the car can actually
-    // drive on, Pac-Man-maze-wall style. Numbered issue markers (missing connections, risky
-    // intersections, shallow forks - see findRiskyIntersections/findShallowForks/
-    // findMissingConnections in mapUtils.js) render as DOM Markers instead of a GeoJSON layer, set
-    // up in a separate effect below, since MapLibre symbol layers need a glyphs server this app's
-    // raster-only style doesn't define - Marker elements are plain HTML/CSS, no glyphs needed, and
-    // this project already uses the same approach for the car/spawn markers.
+    // drive on, Pac-Man-maze-wall style, plus a colored dot for every flagged issue (missing
+    // connections, risky intersections, shallow forks - see findMissingConnections/
+    // findRiskyIntersections/findShallowForks in mapUtils.js). The dots are a plain GeoJSON circle
+    // layer (GPU-rendered, near-zero per-frame cost) rather than one maplibregl.Marker per point -
+    // a first attempt used one Marker each, which was fine for the handful of car/player markers
+    // this app normally has, but each Marker re-subscribes to the map's own 'move' event to keep
+    // itself positioned, and the driving loop calls map.jumpTo() every single animation frame -
+    // with ~4700 markers on the wide-bbox dataset that was ~4700 position recalcs every frame,
+    // confirmed live as the cause of the game becoming nearly unplayably laggy. Numbered labels
+    // (which DO need real DOM elements, since this app's raster-only style has no glyphs server for
+    // MapLibre's own symbol-layer text) are added separately, only for whatever's on-screen right
+    // now - see the debug-issue-labels effect further down.
     map.addSource('debug-graph-edges', { type: 'geojson', data: graphEdgesToGeoJSON(null) })
     map.addLayer({
       id: 'debug-graph-edges',
@@ -1166,6 +1183,19 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
       source: 'debug-graph-edges',
       layout: { visibility: 'none' },
       paint: { 'line-color': '#00e5ff', 'line-width': 4, 'line-opacity': 0.75 }
+    })
+    map.addSource('debug-issue-points', { type: 'geojson', data: debugIssuePointsToGeoJSON([]) })
+    map.addLayer({
+      id: 'debug-issue-points',
+      type: 'circle',
+      source: 'debug-issue-points',
+      layout: { visibility: 'none' },
+      paint: {
+        'circle-radius': 6,
+        'circle-color': ['match', ['get', 'type'], 'missing', '#ff9100', 'risky', '#ff1744', 'shallow', '#7c4dff', '#999999'],
+        'circle-stroke-color': '#ffffff',
+        'circle-stroke-width': 1.5
+      }
     })
     setMapReady(true)
   }, [])
@@ -1757,46 +1787,85 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
     return deduped
   }, [graph])
 
-  // Numbered debug-issue markers (missing connections / risky intersections / shallow forks) -
-  // plain DOM Markers rather than a GeoJSON symbol layer, since this app's raster-only map style
-  // has no glyphs server for MapLibre to render symbol text with (see the map-init effect). Lets
-  // someone scanning the map reference a specific spot back by number ("M42 is a real gap, S17
-  // works fine") instead of describing coordinates.
+  // One flat, numbered list backing both the GPU dot layer and the on-screen labels below - built
+  // once per graph/list change, not per render.
+  const debugIssuePoints = useMemo(() => {
+    const points = []
+    missingConnections.forEach((m, i) => points.push({
+      type: 'missing', num: i + 1, coord: m.coord,
+      title: `"${m.streetName}" doesn't connect to nearby "${m.gap.edgeName}" (${Math.round(m.gap.distance)}m gap)`
+    }))
+    riskyIntersections.forEach((r, i) => points.push({
+      type: 'risky', num: i + 1, coord: r.coord,
+      title: `On "${r.streetName}", going straight can wrongly divert onto "${r.divertsToName}"`
+    }))
+    shallowForks.forEach((f, i) => points.push({
+      type: 'shallow', num: i + 1, coord: f.coord,
+      title: `On "${f.streetName}", "${f.forkName}" forks off just ${Math.abs(f.angleDeg)}deg away`
+    }))
+    return points
+  }, [missingConnections, riskyIntersections, shallowForks])
+
+  useEffect(() => {
+    if (!mapReady) return
+    const map = mapRef.current
+    if (!map) return
+    map.getSource('debug-issue-points')?.setData(debugIssuePointsToGeoJSON(showDebugGraph ? debugIssuePoints : []))
+    map.setLayoutProperty('debug-issue-points', 'visibility', showDebugGraph ? 'visible' : 'none')
+  }, [showDebugGraph, debugIssuePoints, mapReady])
+
+  // Numbered labels for whatever's currently on-screen - real DOM Markers (this app's raster-only
+  // style has no glyphs server for MapLibre's own symbol-layer text), but only for points within
+  // the current viewport, refreshed on a plain interval rather than the map's 'move' event. The
+  // colored dots above (a GeoJSON circle layer) already cover all of them cheaply; labels are the
+  // expensive part - each Marker re-subscribes to 'move' to stay positioned, and the driving loop's
+  // per-frame map.jumpTo() means every mounted Marker recomputes every frame. Capping this to "on
+  // screen right now" (typically a few dozen, worst case capped at 150) instead of the full list
+  // (confirmed live: ~4700 on the wide-bbox dataset) is what keeps this cheap regardless of total
+  // issue count - polling every 400ms instead of on 'move' keeps it decoupled from frame rate too.
   useEffect(() => {
     const map = mapRef.current
-    if (!map || !mapReady) return
-
-    for (const marker of debugIssueMarkersRef.current) marker.remove()
-    debugIssueMarkersRef.current = []
-    if (!showDebugGraph) return
-
-    const lists = [
-      {
-        items: missingConnections, cls: 'debug-issue-marker--missing', prefix: 'M',
-        title: (m) => `"${m.streetName}" doesn't connect to nearby "${m.gap.edgeName}" (${Math.round(m.gap.distance)}m gap)`
-      },
-      {
-        items: riskyIntersections, cls: 'debug-issue-marker--risky', prefix: 'R',
-        title: (r) => `On "${r.streetName}", going straight can wrongly divert onto "${r.divertsToName}"`
-      },
-      {
-        items: shallowForks, cls: 'debug-issue-marker--shallow', prefix: 'S',
-        title: (f) => `On "${f.streetName}", "${f.forkName}" forks off just ${Math.abs(f.angleDeg)}deg away`
-      }
-    ]
-
-    const markers = []
-    for (const { items, cls, prefix, title } of lists) {
-      items.forEach((item, i) => {
-        const el = document.createElement('div')
-        el.className = `debug-issue-marker ${cls}`
-        el.textContent = `${prefix}${i + 1}`
-        el.title = title(item)
-        markers.push(new maplibregl.Marker({ element: el }).setLngLat([item.coord[1], item.coord[0]]).addTo(map))
-      })
+    if (!map || !mapReady || !showDebugGraph) {
+      for (const marker of debugIssueMarkersRef.current.values()) marker.remove()
+      debugIssueMarkersRef.current = new Map()
+      return
     }
-    debugIssueMarkersRef.current = markers
-  }, [showDebugGraph, missingConnections, riskyIntersections, shallowForks, mapReady])
+
+    const MAX_LABELS = 150
+    const refresh = () => {
+      const bounds = map.getBounds()
+      const south = bounds.getSouth(), north = bounds.getNorth(), west = bounds.getWest(), east = bounds.getEast()
+      const visible = []
+      for (const p of debugIssuePoints) {
+        if (p.coord[0] >= south && p.coord[0] <= north && p.coord[1] >= west && p.coord[1] <= east) {
+          visible.push(p)
+          if (visible.length >= MAX_LABELS) break
+        }
+      }
+
+      const current = debugIssueMarkersRef.current
+      const nextKeys = new Set(visible.map((p) => `${p.type}${p.num}`))
+      for (const [key, marker] of current) {
+        if (!nextKeys.has(key)) {
+          marker.remove()
+          current.delete(key)
+        }
+      }
+      for (const p of visible) {
+        const key = `${p.type}${p.num}`
+        if (current.has(key)) continue
+        const el = document.createElement('div')
+        el.className = `debug-issue-marker debug-issue-marker--${p.type}`
+        el.textContent = `${p.type[0].toUpperCase()}${p.num}`
+        el.title = p.title
+        current.set(key, new maplibregl.Marker({ element: el }).setLngLat([p.coord[1], p.coord[0]]).addTo(map))
+      }
+    }
+
+    refresh()
+    const interval = setInterval(refresh, 400)
+    return () => clearInterval(interval)
+  }, [showDebugGraph, debugIssuePoints, mapReady])
 
   useEffect(() => {
     if (!graph) return
