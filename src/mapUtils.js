@@ -1109,7 +1109,20 @@ export function chooseNextSegment(graph, nodeKey, currentEdge, currentHeadingDeg
   if (absoluteTargetDeg === null) {
     if (turnPreference === 'left' || turnPreference === 'right') {
       const sign = turnPreference === 'left' ? 1 : -1
-      const directional = choices.filter((choice) => choice.angleDelta * sign > 10)
+      // A candidate beyond this is basically a reversal, never what a normal turn signal means -
+      // confirmed live as a real bug (Boulevard Père-Lelièvre/Boulevard Central, a curved street
+      // that gets re-entered from either of two directions depending on the driven route): pressing
+      // "right" would sometimes send the car onto a candidate ~171deg away (a near-total U-turn),
+      // simply because its angle sign happened to match "right" - the old filter had no upper
+      // bound, so it treated a hairpin exactly like a gentle turn as long as the sign matched. Only
+      // ignored if EVERY candidate is beyond it (a genuine dead-end/hairpin with nothing else to
+      // pick) - matches the same "don't invent a wrong choice, but don't strand a real dead end
+      // either" shape as SAME_STREET_CONTINUE_MAX_ANGLE_DEG below.
+      const MAX_TURN_ANGLE_DEG = 150
+      const plausible = choices.filter((choice) => choice.angleDelta * sign <= MAX_TURN_ANGLE_DEG)
+      const pool = plausible.length ? plausible : choices
+
+      const directional = pool.filter((choice) => choice.angleDelta * sign > 10)
       // Continuing on the SAME street the player is already on is never what an explicit
       // left/right press means, even when its angle technically clears the threshold above - real
       // streets are rarely perfectly straight, so "continue on Rue Couillard" can register as a
@@ -1142,9 +1155,9 @@ export function chooseNextSegment(graph, nodeKey, currentEdge, currentHeadingDeg
         // straight options are already gone, comparing what's left against each other is reliable
         // enough to tell two real branches apart.
         const NEGLIGIBLE_ANGLE_DEG = 3
-        const real = choices.filter((choice) => choice.absAngle > NEGLIGIBLE_ANGLE_DEG)
-        const pool = real.length ? real : choices
-        filtered = [pool.slice().sort((a, b) => b.angleDelta * sign - a.angleDelta * sign)[0]]
+        const real = pool.filter((choice) => choice.absAngle > NEGLIGIBLE_ANGLE_DEG)
+        const finalPool = real.length ? real : pool
+        filtered = [finalPool.slice().sort((a, b) => b.angleDelta * sign - a.angleDelta * sign)[0]]
       }
     } else if (currentEdge.name) {
       // Among same-named options that are at least plausibly "continuing" (within the angle

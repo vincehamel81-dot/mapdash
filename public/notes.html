@@ -35,6 +35,12 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.10.12 (2026-07-18)</h2>
+<ul>
+  <li>Fixed a real bug behind "sometimes I go forward, sometimes I turn back on myself" at the same spot pressing the same key. Root cause: turn signals had no limit on how sharp a turn they'd accept - at a curved street re-entered from either of two directions, "right" could sometimes mean a normal continuation and sometimes mean a near-total U-turn onto a different street, since both technically matched "right" by angle. A turn signal now never selects something that extreme unless it's genuinely the only option (a real dead end)</li>
+  <li>Removed missing-connection markers from the debug overlay after review confirmed they're consistently genuine dead-ends, not worth flagging one by one. Risky-intersection markers remain</li>
+</ul>
+
 <h2>Version 1.10.11 (2026-07-17)</h2>
 <ul>
   <li>Debug markers (missing connections / risky intersections) now show up in Single mode too, not just the tight-bbox modes - same reviewable ~300-item list either way, since it's always computed from the same Québec-only scope regardless of which map is actually being driven on</li>

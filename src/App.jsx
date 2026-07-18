@@ -23,7 +23,6 @@ import {
   haversine,
   pickRandomStreetPoint,
   findRiskyIntersections,
-  findMissingConnections,
   pickRandomNextSegment,
   pickStraightBiasedNextSegment,
   pickLeftBiasedNextSegment,
@@ -1177,9 +1176,9 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
       paint: { 'line-color': '#e53935', 'line-width': 3, 'line-dasharray': [2, 2], 'line-opacity': 0.85 }
     })
     // Debug overlay ("Debug: street graph" checkbox) - draws every edge the car can actually
-    // drive on, Pac-Man-maze-wall style, plus a colored dot for every flagged issue (missing
-    // connections, risky intersections - tight-bbox modes only, see findMissingConnections/
-    // findRiskyIntersections in mapUtils.js). The dots are a plain GeoJSON circle
+    // drive on, Pac-Man-maze-wall style, plus a colored dot for every flagged risky intersection
+    // (see findRiskyIntersections in mapUtils.js - missing-connections/shallow-forks were dropped
+    // from the live overlay after review, see debugIssuePoints). The dots are a plain GeoJSON circle
     // layer (GPU-rendered, near-zero per-frame cost) rather than one maplibregl.Marker per point -
     // a first attempt used one Marker each, which was fine for the handful of car/player markers
     // this app normally has, but each Marker re-subscribes to the map's own 'move' event to keep
@@ -1784,38 +1783,24 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
     setDebugIssueGraph(buildCachedGraph('debugIssues', CONFIG.bbox, ['Québec']).graph)
   }, [rawSegments, buildCachedGraph])
 
-  // Always computed against the tight debugIssueGraph (~316 spots), not the current mode's
-  // gameplay graph - shows the same manageable, reviewable list whether currently playing in a
-  // tight-bbox mode or Single/Team's much bigger one (direct request: markers should be visible in
-  // Single too, not just tight-bbox modes - Single's map is a superset area, so every tight-bbox
-  // marker still falls somewhere on it).
-  const missingConnections = useMemo(
-    () => (debugIssueGraph ? findMissingConnections(debugIssueGraph, { bbox: CONFIG.bbox }) : []),
-    [debugIssueGraph]
-  )
-
   // One flat, numbered list backing both the GPU dot layer and the on-screen labels below - built
-  // once per graph/list change, not per render. Deliberately does NOT include shallow forks
-  // (findShallowForks) - that list is dominated by harmless same-angle street-name-changes (most
-  // fork at 0-2deg with nothing ambiguous about them) and the turn-signal fix already handles all of
-  // them generically, so it was never meant for one-by-one review - it stays available via
-  // `npm run audit:graph`'s geojson output for spot-checking, not as a live in-game marker set.
+  // once per graph/list change, not per render. Deliberately does NOT include missing-connections
+  // (findMissingConnections) or shallow forks (findShallowForks) anymore - reviewed live and
+  // confirmed as consistently genuine real-world dead-ends, not worth flagging one-by-one, and the
+  // shallow-fork turn-signal fix already handles all of those generically. Both stay available via
+  // `npm run audit:graph`'s geojson output if that ever needs revisiting.
   //
   // Numbers are assigned here, BEFORE the DISMISSED_DEBUG_ISSUES filter below - so manually
   // reviewed spots can be dropped from the list (fewer markers left to check) without ever
   // reshuffling any other marker's number.
   const debugIssuePoints = useMemo(() => {
     const points = []
-    missingConnections.forEach((m, i) => points.push({
-      type: 'missing', num: i + 1, coord: m.coord,
-      title: `"${m.streetName}" doesn't connect to nearby "${m.gap.edgeName}" (${Math.round(m.gap.distance)}m gap)`
-    }))
     riskyIntersections.forEach((r, i) => points.push({
       type: 'risky', num: i + 1, coord: r.coord,
       title: `On "${r.streetName}", going straight can wrongly divert onto "${r.divertsToName}"`
     }))
     return points.filter((p) => !DISMISSED_DEBUG_ISSUES.has(`${p.type}${p.num}`))
-  }, [missingConnections, riskyIntersections])
+  }, [riskyIntersections])
 
   useEffect(() => {
     if (!mapReady) return
