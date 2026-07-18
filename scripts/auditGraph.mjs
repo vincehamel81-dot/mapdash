@@ -13,7 +13,7 @@
 
 import fs from 'fs'
 import path from 'path'
-import { buildGraph, haversine, pointToSegmentDistance, findRiskyIntersections } from '../src/mapUtils.js'
+import { buildGraph, haversine, pointToSegmentDistance, findRiskyIntersections, findShallowForks } from '../src/mapUtils.js'
 import { CONFIG } from '../src/config.js'
 
 const SEGMENTS_PATH = path.resolve('public/data/QBC/segments.json')
@@ -84,6 +84,25 @@ for (const r of risky) {
 const highwayRisky = risky.filter((r) => /autoroute/i.test(r.streetName) || /autoroute/i.test(r.divertsToName))
 console.log(`\n  -> ${highwayRisky.length} of those involve a highway (matches the "highways are the most glitchy" pattern).`)
 
+// --- Issue 3: shallow forks (turn-signal <10deg fix, other spots with the same shape) ----------
+//
+// Fixed live for one exact case (Autoroute Henri-IV / Bretelle Aut. 73 Nord, Henri IV Nord) - a
+// real, differently-named fork existed but split off at such a shallow angle that neither it nor
+// the mainline cleared chooseNextSegment's +-10deg "clearly left/right" threshold, so an explicit
+// turn signal was silently ignored. The fix (any other-named candidate wins over doing nothing) is
+// now general, but this list surfaces every OTHER spot with the same shallow-angle shape so they can
+// be spot-checked directly instead of waiting for more live reports.
+
+const shallowForks = findShallowForks(graph)
+console.log(`\nISSUE 3 - Shallow forks: ${shallowForks.length} spots where a real, differently-named fork splits off within 10deg of straight ahead.`)
+console.log('(The turn-signal fix now handles these generally - this list is for spot-checking, not a live bug list.)\n')
+for (const f of shallowForks.slice(0, 30)) {
+  console.log(`  On "${f.streetName}", "${f.forkName}" forks off just ${Math.abs(f.angleDeg)}deg away  [${f.coord[0].toFixed(5)}, ${f.coord[1].toFixed(5)}]`)
+}
+if (shallowForks.length > 30) console.log(`  ...and ${shallowForks.length - 30} more (see the GeoJSON file).`)
+const highwayShallow = shallowForks.filter((f) => /autoroute/i.test(f.streetName) || /autoroute/i.test(f.forkName))
+console.log(`\n  -> ${highwayShallow.length} of those involve a highway.`)
+
 // --- Issue 3: very short blocks (turn-signal timing risk) --------------------------------------
 //
 // NOT a confirmed bug list - a risk indicator. A tapped turn stays "pending" for 1.2s, meant to be
@@ -104,7 +123,7 @@ function dangerZoneMeters(speedKmh, turbo) {
 }
 
 const shortBlocks = allEdges.filter((e) => e.name && e.lengthMeters < dangerZoneMeters(e.speedKmh, true))
-console.log(`\nISSUE 3 - Short blocks (risk indicator, not a confirmed bug): ${shortBlocks.length} street pieces shorter than a tapped turn signal's 1.2s window at Turbo speed.`)
+console.log(`\nISSUE 4 - Short blocks (risk indicator, not a confirmed bug): ${shortBlocks.length} street pieces shorter than a tapped turn signal's 1.2s window at Turbo speed.`)
 console.log('(A single short block is fine; chains of them are the actual risk - see the streetName groupings below.)\n')
 const byStreet = new Map()
 for (const e of shortBlocks) {
@@ -138,4 +157,13 @@ fs.writeFileSync(path.join(OUTPUT_DIR, 'wrong-turn-intersections.geojson'), JSON
   }))
 }, null, 2))
 
-console.log(`\nWrote scripts/output/missing-connections.geojson and wrong-turn-intersections.geojson`)
+fs.writeFileSync(path.join(OUTPUT_DIR, 'shallow-forks.geojson'), JSON.stringify({
+  type: 'FeatureCollection',
+  features: shallowForks.map((f) => ({
+    type: 'Feature',
+    geometry: { type: 'Point', coordinates: [f.coord[1], f.coord[0]] },
+    properties: { streetName: f.streetName, forkName: f.forkName, angleDeg: f.angleDeg }
+  }))
+}, null, 2))
+
+console.log(`\nWrote scripts/output/missing-connections.geojson, wrong-turn-intersections.geojson and shallow-forks.geojson`)

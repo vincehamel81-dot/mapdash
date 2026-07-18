@@ -1244,6 +1244,43 @@ export function findRiskyIntersections(graph, { sameNameMaxAngleDeg = 40 } = {})
   return risky
 }
 
+// Finds the exact shape of bug fixed live on Autoroute Henri-IV / Bretelle Aut. 73 Nord (see
+// chooseNextSegment's left/right handling): a real, differently-named fork exists at a node, but
+// splits off the entering street at such a shallow angle that it falls within the +-thresholdDeg
+// band chooseNextSegment treats as "not clearly left or right of straight" - before the fix, an
+// explicit turn signal onto exactly this kind of candidate could be silently ignored. Distinct from
+// findRiskyIntersections (which is about the SMALLEST-angle candidate winning over the real
+// continuation with no signal at all) - this is about signaled turns onto a shallow candidate.
+export function findShallowForks(graph, { thresholdDeg = 10 } = {}) {
+  const shallow = []
+  for (const node of graph.nodes.values()) {
+    if (node.edges.length < 3) continue
+    for (const enteringEdge of node.edges) {
+      if (!enteringEdge.name) continue
+      const refHeading = arrivalHeadingAtNode(enteringEdge, node.key)
+      const others = node.edges
+        .filter((edge) => edge.id !== enteringEdge.id && edge.name && edge.name !== enteringEdge.name)
+        .map((edge) => ({
+          edge,
+          angleDelta: signedAngleBetween(refHeading, departureHeadingFromNode(edge, node.key))
+        }))
+        .filter((choice) => Math.abs(choice.angleDelta) <= thresholdDeg)
+        .sort((a, b) => Math.abs(a.angleDelta) - Math.abs(b.angleDelta))
+
+      const shallowest = others[0]
+      if (!shallowest) continue
+
+      shallow.push({
+        coord: node.coord,
+        streetName: enteringEdge.name,
+        forkName: shallowest.edge.name,
+        angleDeg: Math.round(shallowest.angleDelta)
+      })
+    }
+  }
+  return shallow
+}
+
 // NPC driving (ambient traffic, ~v1): picks a uniformly random real candidate at the intersection,
 // deliberately NOT angle-scored like chooseNextSegment - a bot doesn't have a heading preference to
 // honor, it just needs to keep moving somewhere real. Kept separate from chooseNextSegment so this
