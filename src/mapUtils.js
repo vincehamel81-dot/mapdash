@@ -1108,9 +1108,8 @@ export function chooseNextSegment(graph, nodeKey, currentEdge, currentHeadingDeg
   let filtered = choices
   if (absoluteTargetDeg === null) {
     if (turnPreference === 'left' || turnPreference === 'right') {
-      const directional = turnPreference === 'left'
-        ? choices.filter((choice) => choice.angleDelta > 10)
-        : choices.filter((choice) => choice.angleDelta < -10)
+      const sign = turnPreference === 'left' ? 1 : -1
+      const directional = choices.filter((choice) => choice.angleDelta * sign > 10)
       // Continuing on the SAME street the player is already on is never what an explicit
       // left/right press means, even when its angle technically clears the threshold above - real
       // streets are rarely perfectly straight, so "continue on Rue Couillard" can register as a
@@ -1124,19 +1123,28 @@ export function chooseNextSegment(graph, nodeKey, currentEdge, currentHeadingDeg
       } else if (directional.length) {
         filtered = directional
       } else {
-        // Shallow-fork fallback: nothing cleared the confident 10deg threshold above - confirmed
-        // live via console repro on a real highway interchange (Autoroute Henri-IV / Bretelle Aut.
-        // 73 Nord, Henri IV Nord: ramp only 5deg one way, mainline 1deg the other - a real ramp can
-        // split off the mainline at a very shallow angle at highway speeds). Falling all the way
-        // through to `choices` here means "pick whichever's closest to straight", which is always
-        // the mainline in this shape - the explicit signal had no effect no matter which way was
-        // pressed. An explicit turn signal means "get me off this street" at least as much as it
-        // means "on this exact side" - prefer any other-named candidate over continuing on the
-        // current street even at a shallow angle, and only fall through to the true do-nothing
-        // fallback (`choices`, via the sort below) when the only other option really is a
-        // same-named continuation.
-        const otherNamed = choices.filter((choice) => choice.edge.name !== currentEdge.name)
-        filtered = otherNamed.length ? otherNamed : choices
+        // Shallow-fork fallback: nothing cleared the confident 10deg threshold above. Two
+        // confirmed-live shapes need different handling here, not just "exclude same-named":
+        //  - A same-named candidate that's essentially dead straight (Autoroute Henri-IV's own
+        //    mainline at a highway exit, 1deg off) isn't a real alternative to anything - it should
+        //    never win an explicit turn signal, regardless of which way the signal points.
+        //  - A same-named candidate at a more substantial shallow angle (a service-road fork where
+        //    BOTH branches keep the street's own name, one at -8deg) IS a real, distinct branch -
+        //    unconditionally excluding same-named candidates here sent BOTH left and right presses
+        //    to the one remaining other-named candidate, so the signal had no effect either way
+        //    (confirmed live: Bretelle Boul. Père-Lelièvre, Sortie 8 forking into itself plus a bus
+        //    service road - pressing right needed to reach the OTHER Bretelle branch, not the bus
+        //    road, but the fix as first shipped could never reach it).
+        // So: drop candidates too close to dead-straight to be a real option (regardless of name),
+        // then let the signed angle - not the name - decide among whatever's left. Raw angle sign
+        // is noisy at these shallow angles (the Henri-IV ramp is numerically a hair "left" of
+        // straight despite being the correct answer for a right signal), but once the nearly-
+        // straight options are already gone, comparing what's left against each other is reliable
+        // enough to tell two real branches apart.
+        const NEGLIGIBLE_ANGLE_DEG = 3
+        const real = choices.filter((choice) => choice.absAngle > NEGLIGIBLE_ANGLE_DEG)
+        const pool = real.length ? real : choices
+        filtered = [pool.slice().sort((a, b) => b.angleDelta * sign - a.angleDelta * sign)[0]]
       }
     } else if (currentEdge.name) {
       // Among same-named options that are at least plausibly "continuing" (within the angle

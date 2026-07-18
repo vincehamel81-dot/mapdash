@@ -35,6 +35,11 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.10.10 (2026-07-17)</h2>
+<ul>
+  <li>Fixed the previous turn-signal fix having a blind spot: when a street forks into two branches under its own name (e.g. a service road splitting into two, both still called the same thing), left and right could both send you down the same one, since the fix always favored whichever option had a different name - even when the real correct turn was the same-named branch. Root-caused live from a reported spot ("Bretelle Boul. Père-Lelièvre, Sortie 8" forking into itself plus a bus access road) where both directions picked the bus road. Now a barely-off-straight same-named option still gets correctly ignored (the original highway-ramp case), but a real same-named fork gets treated as a real fork</li>
+</ul>
+
 <h2>Version 1.10.9 (2026-07-17)</h2>
 <ul>
   <li>Scaled the debug markers back down to what's actually reviewable: they now only show up in tight-bbox modes (Survival, Tag, Finder, etc.) where the count matches the ~300 real list, instead of Single/Team's much bigger map (Québec + Lévis) which was showing thousands. Also dropped the shallow-fork markers from the live overlay entirely - the turn-signal fix already covers all of them generically, so they were never meant for one-by-one checking. Bumped marker size/contrast for readability</li>
