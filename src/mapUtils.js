@@ -1119,7 +1119,25 @@ export function chooseNextSegment(graph, nodeKey, currentEdge, currentHeadingDeg
       // Falls back to the unfiltered directional set (then to every choice) so a real dead end or
       // a same-named fork as the only option in that direction still works.
       const otherStreet = directional.filter((choice) => choice.edge.name !== currentEdge.name)
-      filtered = otherStreet.length ? otherStreet : directional.length ? directional : choices
+      if (otherStreet.length) {
+        filtered = otherStreet
+      } else if (directional.length) {
+        filtered = directional
+      } else {
+        // Shallow-fork fallback: nothing cleared the confident 10deg threshold above - confirmed
+        // live via console repro on a real highway interchange (Autoroute Henri-IV / Bretelle Aut.
+        // 73 Nord, Henri IV Nord: ramp only 5deg one way, mainline 1deg the other - a real ramp can
+        // split off the mainline at a very shallow angle at highway speeds). Falling all the way
+        // through to `choices` here means "pick whichever's closest to straight", which is always
+        // the mainline in this shape - the explicit signal had no effect no matter which way was
+        // pressed. An explicit turn signal means "get me off this street" at least as much as it
+        // means "on this exact side" - prefer any other-named candidate over continuing on the
+        // current street even at a shallow angle, and only fall through to the true do-nothing
+        // fallback (`choices`, via the sort below) when the only other option really is a
+        // same-named continuation.
+        const otherNamed = choices.filter((choice) => choice.edge.name !== currentEdge.name)
+        filtered = otherNamed.length ? otherNamed : choices
+      }
     } else if (currentEdge.name) {
       // Among same-named options that are at least plausibly "continuing" (within the angle
       // bound), prefer the LONGEST one rather than the smallest angle. A short stub's local

@@ -35,6 +35,11 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.10.6 (2026-07-17)</h2>
+<ul>
+  <li>Fixed flashing a turn signal doing nothing at shallow highway forks (e.g. an exit ramp splitting off the mainline at just a few degrees). Root-caused live from an actual console repro: neither the ramp nor the mainline was clearly enough "left" or "right" of straight ahead to satisfy the turn-signal logic, so it quietly ignored the signal and just kept going straight - which mostly happened to be the mainline. Now, when nothing is clearly enough to one side, an active turn signal at least gets you off the street you're currently on instead of defaulting to "closest to straight"</li>
+</ul>
+
 <h2>Version 1.10.5 (2026-07-17)</h2>
 <ul>
   <li>Re-added real intersection splitting where two streets' lines actually cross in space (highway ramps, X-intersections) - pure geometry, no guessing involved, so it can't invent a fake connection. Tested two other "should be safe" reconnection ideas (matching a dead-end to a nearby street's interior point; stitching a divided road's two carriageways back together) and both turned out to make things worse once measured properly, not better - so they're staying off for now rather than shipping something that just trades one kind of bad intersection for another. Net effect versus 1.10.4: about the same clean baseline (~316 flagged gaps, 89 confusing intersections), plus real X-crossings now connect. Still driving with the same official street data - see "Debug: street graph" to inspect it directly, and keep reporting spots that feel wrong so they can be fixed one at a time instead of with a blanket rule</li>
