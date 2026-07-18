@@ -23,6 +23,8 @@ import {
   haversine,
   pickRandomStreetPoint,
   findRiskyIntersections,
+  findShallowForks,
+  findMissingConnections,
   pickRandomNextSegment,
   pickStraightBiasedNextSegment,
   pickLeftBiasedNextSegment,
@@ -431,17 +433,6 @@ function graphEdgesToGeoJSON(graph) {
       type: 'Feature',
       geometry: { type: 'LineString', coordinates: edge.polyline.map(([lat, lng]) => [lng, lat]) },
       properties: { name: edge.name || '' }
-    }))
-  }
-}
-
-function riskyIntersectionsToGeoJSON(riskyIntersections) {
-  return {
-    type: 'FeatureCollection',
-    features: (riskyIntersections || []).map((r) => ({
-      type: 'Feature',
-      geometry: { type: 'Point', coordinates: [r.coord[1], r.coord[0]] },
-      properties: { streetName: r.streetName, divertsToName: r.divertsToName }
     }))
   }
 }
@@ -1054,6 +1045,7 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
   const carMarkerRef = useRef(null)
   const carMarkerElRef = useRef(null)
   const spawnMarkerRef = useRef(null)
+  const debugIssueMarkersRef = useRef([])
   const compassRef = useRef(null)
   const northUpModeRef = useRef(false)
   const activeZoomGestureRef = useRef(false)
@@ -1161,9 +1153,12 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
       paint: { 'line-color': '#e53935', 'line-width': 3, 'line-dasharray': [2, 2], 'line-opacity': 0.85 }
     })
     // Debug overlay ("Debug: street graph" checkbox) - draws every edge the car can actually
-    // drive on, Pac-Man-maze-wall style, plus red dots at intersections where the game's
-    // straight-ahead default can wrongly divert onto a different street (see
-    // findRiskyIntersections in mapUtils.js). Off by default; hidden until toggled on.
+    // drive on, Pac-Man-maze-wall style. Numbered issue markers (missing connections, risky
+    // intersections, shallow forks - see findRiskyIntersections/findShallowForks/
+    // findMissingConnections in mapUtils.js) render as DOM Markers instead of a GeoJSON layer, set
+    // up in a separate effect below, since MapLibre symbol layers need a glyphs server this app's
+    // raster-only style doesn't define - Marker elements are plain HTML/CSS, no glyphs needed, and
+    // this project already uses the same approach for the car/spawn markers.
     map.addSource('debug-graph-edges', { type: 'geojson', data: graphEdgesToGeoJSON(null) })
     map.addLayer({
       id: 'debug-graph-edges',
@@ -1171,14 +1166,6 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
       source: 'debug-graph-edges',
       layout: { visibility: 'none' },
       paint: { 'line-color': '#00e5ff', 'line-width': 4, 'line-opacity': 0.75 }
-    })
-    map.addSource('debug-risky-nodes', { type: 'geojson', data: riskyIntersectionsToGeoJSON([]) })
-    map.addLayer({
-      id: 'debug-risky-nodes',
-      type: 'circle',
-      source: 'debug-risky-nodes',
-      layout: { visibility: 'none' },
-      paint: { 'circle-color': '#ff1744', 'circle-radius': 9, 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2 }
     })
     setMapReady(true)
   }, [])
@@ -1527,10 +1514,8 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
     const map = mapRef.current
     if (!map) return
     map.getSource('debug-graph-edges')?.setData(graphEdgesToGeoJSON(showDebugGraph ? graph : null))
-    map.getSource('debug-risky-nodes')?.setData(riskyIntersectionsToGeoJSON(showDebugGraph ? riskyIntersections : []))
     map.setLayoutProperty('debug-graph-edges', 'visibility', showDebugGraph ? 'visible' : 'none')
-    map.setLayoutProperty('debug-risky-nodes', 'visibility', showDebugGraph ? 'visible' : 'none')
-  }, [showDebugGraph, graph, riskyIntersections, mapReady])
+  }, [showDebugGraph, graph, mapReady])
   // North-up mode: each of W/A/S/D independently causes movement (an absolute compass command),
   // not just W as the accelerator - matches every other mode's "hold W to go" everywhere else.
   const movementKeyHeld = northUpMode ? controls.forward || controls.backward || controls.left || controls.right : controls.forward
@@ -1746,6 +1731,72 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
     setSegments(filtered)
     setGraph(builtGraph)
   }, [rawSegments, wideBboxMode])
+
+  // The other two debug-issue lists (findRiskyIntersections is computed further up already) - bbox
+  // must match whichever the graph above was actually built against, or the "near the edge of the
+  // map, not a real gap" exclusion in findMissingConnections won't line up.
+  const activeBbox = wideBboxMode ? CONFIG.bboxWide : CONFIG.bbox
+  const missingConnections = useMemo(
+    () => (graph ? findMissingConnections(graph, { bbox: activeBbox }) : []),
+    [graph, activeBbox]
+  )
+  // findShallowForks reports both directions of every fork (entering A, forking onto B - and
+  // separately entering B, forking onto A) since each is a genuinely different turn-signal
+  // scenario for chooseNextSegment - but they're the same physical spot to a human scanning the
+  // map, so dedupe by the unordered name pair + coordinate before numbering.
+  const shallowForks = useMemo(() => {
+    if (!graph) return []
+    const seen = new Set()
+    const deduped = []
+    for (const f of findShallowForks(graph)) {
+      const key = `${[f.streetName, f.forkName].sort().join('|')}@${f.coord[0].toFixed(5)},${f.coord[1].toFixed(5)}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      deduped.push(f)
+    }
+    return deduped
+  }, [graph])
+
+  // Numbered debug-issue markers (missing connections / risky intersections / shallow forks) -
+  // plain DOM Markers rather than a GeoJSON symbol layer, since this app's raster-only map style
+  // has no glyphs server for MapLibre to render symbol text with (see the map-init effect). Lets
+  // someone scanning the map reference a specific spot back by number ("M42 is a real gap, S17
+  // works fine") instead of describing coordinates.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !mapReady) return
+
+    for (const marker of debugIssueMarkersRef.current) marker.remove()
+    debugIssueMarkersRef.current = []
+    if (!showDebugGraph) return
+
+    const lists = [
+      {
+        items: missingConnections, cls: 'debug-issue-marker--missing', prefix: 'M',
+        title: (m) => `"${m.streetName}" doesn't connect to nearby "${m.gap.edgeName}" (${Math.round(m.gap.distance)}m gap)`
+      },
+      {
+        items: riskyIntersections, cls: 'debug-issue-marker--risky', prefix: 'R',
+        title: (r) => `On "${r.streetName}", going straight can wrongly divert onto "${r.divertsToName}"`
+      },
+      {
+        items: shallowForks, cls: 'debug-issue-marker--shallow', prefix: 'S',
+        title: (f) => `On "${f.streetName}", "${f.forkName}" forks off just ${Math.abs(f.angleDeg)}deg away`
+      }
+    ]
+
+    const markers = []
+    for (const { items, cls, prefix, title } of lists) {
+      items.forEach((item, i) => {
+        const el = document.createElement('div')
+        el.className = `debug-issue-marker ${cls}`
+        el.textContent = `${prefix}${i + 1}`
+        el.title = title(item)
+        markers.push(new maplibregl.Marker({ element: el }).setLngLat([item.coord[1], item.coord[0]]).addTo(map))
+      })
+    }
+    debugIssueMarkersRef.current = markers
+  }, [showDebugGraph, missingConnections, riskyIntersections, shallowForks, mapReady])
 
   useEffect(() => {
     if (!graph) return

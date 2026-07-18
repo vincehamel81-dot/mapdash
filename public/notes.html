@@ -35,6 +35,11 @@
 <body>
 <h1>MapDashRun - Notes</h1>
 
+<h2>Version 1.10.7 (2026-07-17)</h2>
+<ul>
+  <li>Debug overlay now shows numbered markers for every flagged spot (missing connections in orange, risky intersections in red, shallow forks in purple), so they can be checked one at a time and reported by number instead of by description. Hover a marker for details. Turn on "Debug: street graph" to see them</li>
+</ul>
+
 <h2>Version 1.10.6 (2026-07-17)</h2>
 <ul>
   <li>Fixed flashing a turn signal doing nothing at shallow highway forks (e.g. an exit ramp splitting off the mainline at just a few degrees). Root-caused live from an actual console repro: neither the ramp nor the mainline was clearly enough "left" or "right" of straight ahead to satisfy the turn-signal logic, so it quietly ignored the signal and just kept going straight - which mostly happened to be the mainline. Now, when nothing is clearly enough to one side, an active turn signal at least gets you off the street you're currently on instead of defaulting to "closest to straight"</li>

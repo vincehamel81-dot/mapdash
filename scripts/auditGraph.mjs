@@ -13,24 +13,15 @@
 
 import fs from 'fs'
 import path from 'path'
-import { buildGraph, haversine, pointToSegmentDistance, findRiskyIntersections, findShallowForks } from '../src/mapUtils.js'
+import { buildGraph, findRiskyIntersections, findShallowForks, findMissingConnections } from '../src/mapUtils.js'
 import { CONFIG } from '../src/config.js'
 
 const SEGMENTS_PATH = path.resolve('public/data/QBC/segments.json')
 const OUTPUT_DIR = path.resolve('scripts/output')
 
-const BBOX_MARGIN_DEG = 0.0005 // ~50m - a dead-end this close to the play area's edge just runs off the map, not a bug
-const NEARBY_SEARCH_RADIUS_METERS = 60 // how far to look for "this should probably connect" candidates
-
 function withinBbox(polyline) {
   const { south, west, north, east } = CONFIG.bbox
   return polyline.some(([lat, lng]) => lat >= south && lat <= north && lng >= west && lng <= east)
-}
-
-function isNearBboxEdge([lat, lng]) {
-  const { south, west, north, east } = CONFIG.bbox
-  return lat <= south + BBOX_MARGIN_DEG || lat >= north - BBOX_MARGIN_DEG ||
-    lng <= west + BBOX_MARGIN_DEG || lng >= east - BBOX_MARGIN_DEG
 }
 
 const data = JSON.parse(fs.readFileSync(SEGMENTS_PATH, 'utf8'))
@@ -42,27 +33,7 @@ console.log(`Loaded ${segments.length} street segments -> ${graph.nodes.size} in
 
 // --- Issue 1: missing connections -------------------------------------------------------------
 
-function nearestOtherEdgeGap(node) {
-  const ownEdgeIds = new Set(node.edges.map((e) => e.id))
-  let best = null
-  for (const edge of allEdges) {
-    if (ownEdgeIds.has(edge.id)) continue
-    const roughlyClose = edge.polyline.some((pt) => haversine(node.coord, pt) <= NEARBY_SEARCH_RADIUS_METERS * 3)
-    if (!roughlyClose) continue
-    const result = pointToSegmentDistance(node.coord, edge.polyline)
-    if (result.distance <= NEARBY_SEARCH_RADIUS_METERS && (!best || result.distance < best.distance)) {
-      best = { distance: result.distance, edgeName: edge.name }
-    }
-  }
-  return best
-}
-
-const danglingNodes = Array.from(graph.nodes.values()).filter((n) => n.edges.length === 1)
-const interiorDangling = danglingNodes.filter((n) => !isNearBboxEdge(n.coord))
-const missingConnections = interiorDangling
-  .map((node) => ({ streetName: node.edges[0].name, coord: node.coord, gap: nearestOtherEdgeGap(node) }))
-  .filter((n) => n.gap)
-  .sort((a, b) => a.gap.distance - b.gap.distance)
+const missingConnections = findMissingConnections(graph, { bbox: CONFIG.bbox })
 
 console.log(`ISSUE 1 - Missing connections: ${missingConnections.length} spots where a street stops short of another nearby street it should probably join.`)
 console.log('(Genuine real-world dead-ends are excluded from this list.)\n')

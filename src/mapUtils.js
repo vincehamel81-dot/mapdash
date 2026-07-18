@@ -1190,6 +1190,51 @@ export function getLocalHeadingAtDistance(segment, distanceAlong, direction = 1)
   return getSegmentHeading(segment, direction)
 }
 
+// Dangling (degree-1) streets whose nearest OTHER street is close enough that they should probably
+// connect - the general "street stops short of where it should obviously continue" check. Excludes
+// real dead-ends (nothing else nearby) and dangling ends right at the edge of the playable bbox
+// (that's just the map running out, not a bug). Shared by scripts/auditGraph.mjs and the in-game
+// debug overlay, so both report on identical criteria - `bbox` must match whichever the caller
+// actually built the graph against (tight vs wide), or the edge-of-map exclusion won't line up.
+function isNearBboxEdge([lat, lng], bbox, marginDeg) {
+  return lat <= bbox.south + marginDeg || lat >= bbox.north - marginDeg ||
+    lng <= bbox.west + marginDeg || lng >= bbox.east - marginDeg
+}
+
+export function findMissingConnections(graph, { bbox, bboxMarginDeg = 0.0005, searchRadiusMeters = 60 } = {}) {
+  const allEdges = Array.from(graph.edges.values())
+  if (!allEdges.length) return []
+
+  // Grid-indexed instead of a brute-force scan over every edge per dangling node - fine as a
+  // one-time Node script (the original shape here), but this is also called from a React useMemo
+  // against the live in-game graph, and the wide-bbox dataset (~22k edges) x its dangling-node
+  // count made the brute-force version block the main thread long enough to look like a hang.
+  // Same grid pattern already used by snapDanglingEndpoints/connectInteriorVertices above.
+  const refLat = allEdges[0].polyline[0][0]
+  const cellSize = Math.max(searchRadiusMeters * 2, VERTEX_GRID_CELL_METERS)
+  const grid = buildVertexGrid(allEdges, refLat, cellSize)
+
+  function nearestOtherEdgeGap(node) {
+    const ownEdgeIds = new Set(node.edges.map((e) => e.id))
+    const candidates = nearbyEdgesFromGrid(grid, node.coord, refLat, cellSize).filter((e) => !ownEdgeIds.has(e.id))
+    let best = null
+    for (const edge of candidates) {
+      const result = pointToSegmentDistance(node.coord, edge.polyline)
+      if (result.distance <= searchRadiusMeters && (!best || result.distance < best.distance)) {
+        best = { distance: result.distance, edgeName: edge.name }
+      }
+    }
+    return best
+  }
+
+  const danglingNodes = Array.from(graph.nodes.values()).filter((n) => n.edges.length === 1)
+  const interiorDangling = bbox ? danglingNodes.filter((n) => !isNearBboxEdge(n.coord, bbox, bboxMarginDeg)) : danglingNodes
+  return interiorDangling
+    .map((node) => ({ streetName: node.edges[0].name, coord: node.coord, gap: nearestOtherEdgeGap(node) }))
+    .filter((n) => n.gap)
+    .sort((a, b) => a.gap.distance - b.gap.distance)
+}
+
 // Heading a car would depart `nodeKey` with if it turned onto `edge` there - the same convention
 // chooseNextSegment uses to score every candidate at an intersection.
 export function departureHeadingFromNode(edge, nodeKey) {
