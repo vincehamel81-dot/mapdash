@@ -1082,9 +1082,35 @@ export function signedAngleBetween(a, b) {
 // current street.
 const SAME_STREET_CONTINUE_MAX_ANGLE_DEG = 150
 
+// Manual per-intersection overrides for genuinely ambiguous turn-signal cases - not for bugs (those
+// belong in the general angle logic above/below, since a real bug affects every intersection with
+// that shape, not just one), but for a specific node+entering-street+signal combination where the
+// general logic's best guess is simply wrong and no adjustment to it would fix this spot without
+// risking regressing an already-confirmed-working one elsewhere. Checked first, before any angle
+// math runs, so adding an entry here can only ever affect that one exact combination - zero risk to
+// anything else. Each entry: [nodeKey, enteringEdgeId, turnPreference, targetEdgeId]. nodeKey is the
+// graph node's own key (e.g. "46.824038|-71.297940" - visible in the [nav] console log's context, or
+// look it up from the reported coordinate); enteringEdgeId/targetEdgeId are edge.id values (visible
+// directly in the console log's candidates list, in brackets after each street name).
+const TURN_OVERRIDES = [
+  // ['46.824038|-71.297940', '105772', 'left', '105774'],
+]
+
+const turnOverrideMap = new Map(
+  TURN_OVERRIDES.map(([nodeKey, enteringId, dir, targetId]) => [`${nodeKey}|${enteringId}|${dir}`, String(targetId)])
+)
+
 export function chooseNextSegment(graph, nodeKey, currentEdge, currentHeadingDeg, turnPreference = 'straight', absoluteTargetDeg = null) {
   const node = graph.nodes.get(nodeKey)
   if (!node) return null
+
+  if (absoluteTargetDeg === null) {
+    const overrideTargetId = turnOverrideMap.get(`${nodeKey}|${currentEdge.id}|${turnPreference}`)
+    if (overrideTargetId) {
+      const target = node.edges.find((edge) => String(edge.id) === overrideTargetId)
+      if (target) return target
+    }
+  }
 
   const referenceHeading = absoluteTargetDeg !== null ? absoluteTargetDeg : currentHeadingDeg
   const choices = []
