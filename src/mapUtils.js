@@ -23,6 +23,37 @@ export function offsetLatLng([lat, lng], bearingDeg, distanceMeters) {
   return [lat + dLat, lng + dLng]
 }
 
+// Standard ray-casting point-in-polygon test. `polygon` is an array of [lat, lng] vertices in
+// order (does not need to repeat the first point at the end) - used to shape the tight play area
+// (Survival/Tag/Finder) as an arbitrary perimeter instead of a lat/lng rectangle.
+export function pointInPolygon(lat, lng, polygon) {
+  let inside = false
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const [latI, lngI] = polygon[i]
+    const [latJ, lngJ] = polygon[j]
+    const crosses = (lngI > lng) !== (lngJ > lng) &&
+      lat < ((latJ - latI) * (lng - lngI)) / (lngJ - lngI) + latI
+    if (crosses) inside = !inside
+  }
+  return inside
+}
+
+// Uniform-ish random point inside `polygon` via rejection sampling against its bounding envelope
+// (`bounds` - reuse an already-computed one, e.g. CONFIG.bbox, rather than recomputing per call).
+// Falls back to the polygon's centroid in the pathological case where 200 attempts all miss (only
+// possible for a very thin/concave shape relative to its envelope).
+export function randomPointInPolygon(polygon, bounds) {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const lat = bounds.south + Math.random() * (bounds.north - bounds.south)
+    const lng = bounds.west + Math.random() * (bounds.east - bounds.west)
+    if (pointInPolygon(lat, lng, polygon)) return { lat, lng }
+  }
+  return {
+    lat: polygon.reduce((sum, p) => sum + p[0], 0) / polygon.length,
+    lng: polygon.reduce((sum, p) => sum + p[1], 0) / polygon.length
+  }
+}
+
 export function segmentLengthMeters(polyline) {
   if (!Array.isArray(polyline) || polyline.length < 2) return 0
   let total = 0

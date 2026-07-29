@@ -1,20 +1,31 @@
+// Hand-drawn perimeter for the tight play area (Survival/Tag/Finder) - river to the south, east
+// past the city, up north, then back down the west side - replacing the old lat/lng rectangle so
+// the playable shape actually follows the city instead of a box around it. Excludes Wendake (the
+// small enclave northwest of downtown, ~46.88/-71.368) on purpose: it fell inside the old
+// rectangle's bounds but is outside this drawn shape, so its streets are no longer part of the
+// tight area (still included in bboxWide below via allowedCities).
+const TIGHT_PLAY_AREA_POLYGON = [
+  [46.7287120169986, -71.35862672507919],
+  [46.75529795434113, -71.26009310961916],
+  [46.80502312822129, -71.19778003921499],
+  [46.87113457504163, -71.1479982418608],
+  [46.893310058172005, -71.1498865109615],
+  [46.93247606525985, -71.19829501193664],
+  [46.88615389338014, -71.35759676254446],
+  [46.81717878857192, -71.4052967114355]
+]
+
+function polygonBounds(polygon) {
+  const lats = polygon.map((p) => p[0])
+  const lngs = polygon.map((p) => p[1])
+  return { south: Math.min(...lats), north: Math.max(...lats), west: Math.min(...lngs), east: Math.max(...lngs) }
+}
+
 export const CONFIG = {
-  // Turns out shrinking this repeatedly was chasing the wrong lever: this bbox only ever filtered
-  // which STREET DATA loads - it never actually stopped the camera from panning/zooming out far
-  // enough to reveal real neighbouring places (Lévis, Île d'Orléans) on the base map tiles. That's
-  // now fixed properly with maxBounds on the map itself (see MapView.jsx), which is the real fix.
-  // Tightened a bit further here too, pulled in from the west (a multi-slice scan of the real data
-  // found legitimate Québec-tagged streets extend much further south around -71.30, likely
-  // Sainte-Foy - sacrificed to keep the box centered tighter on downtown).
-  // south/north nudged slightly further out to fully contain Wendake and L'Ancienne-Lorette -
-  // two small enclave municipalities entirely surrounded by Québec (imported separately, see
-  // scripts/importEnclaveData.mjs) that otherwise showed as visible-but-roadless holes on the map.
-  bbox: {
-    south: 46.7852971,
-    west: -71.39947527908767,
-    north: 46.8775804,
-    east: -71.19891865935556
-  },
+  // Kept as the polygon's bounding envelope - still used as a cheap pre-check/rejection-sampling
+  // range in a few places (see bboxPolygon for the actual shape gameplay is constrained to).
+  bbox: polygonBounds(TIGHT_PLAY_AREA_POLYGON),
+  bboxPolygon: TIGHT_PLAY_AREA_POLYGON,
   // The full extent of Québec city's synced street network unioned with Lévis's (imported
   // separately - see scripts/importLevisData.mjs - since Ville de Québec's own open-data portal
   // never covered Lévis at all, a distinct municipality with its own data). Used by modes that

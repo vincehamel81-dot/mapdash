@@ -21,6 +21,8 @@ import {
   resolveEdgeEntry,
   offsetLatLng,
   haversine,
+  pointInPolygon,
+  randomPointInPolygon,
   pickRandomStreetPoint,
   findRiskyIntersections,
   pickRandomNextSegment,
@@ -676,12 +678,20 @@ function interpolateClouds(fromList, toList, t) {
   })
 }
 
-function bboxOutlineGeoJSON(box) {
-  const { south, west, north, east } = box
+// `polygon` is an array of [lat, lng] vertices (closed automatically) - the tight area's hand-drawn
+// perimeter (CONFIG.bboxPolygon) draws straight through here; bboxWide stays a plain rectangle, so
+// its 4 corners are passed via rectCorners below instead.
+function bboxOutlineGeoJSON(polygon) {
+  const ring = polygon.map(([lat, lng]) => [lng, lat])
+  ring.push(ring[0])
   return {
     type: 'Feature',
-    geometry: { type: 'LineString', coordinates: [[west, south], [east, south], [east, north], [west, north], [west, south]] }
+    geometry: { type: 'LineString', coordinates: ring }
   }
+}
+
+function rectCorners(box) {
+  return [[box.south, box.west], [box.south, box.east], [box.north, box.east], [box.north, box.west]]
 }
 
 // Split into two deliberate categories instead of one mixed-probability roll: the ambient spawner
@@ -702,36 +712,41 @@ function randomCloudLifetimeMs() {
   return 7 * 60000 + Math.random() * 8 * 60000
 }
 
-// Spawns are spread uniformly across the whole playable bbox, not anchored to any one player's
+// Spawns are spread uniformly across the whole playable area, not anchored to any one player's
 // position - a room has multiple players scattered across the map, so anchoring to whichever
 // client happened to run the spawn tick (the host) clustered every cloud around just them.
+// Rejection-sampled against the hand-drawn perimeter (CONFIG.bboxPolygon), not a lat/lng rectangle.
 function randomPointInBbox() {
-  return {
-    lat: CONFIG.bbox.south + Math.random() * (CONFIG.bbox.north - CONFIG.bbox.south),
-    lng: CONFIG.bbox.west + Math.random() * (CONFIG.bbox.east - CONFIG.bbox.west)
-  }
+  return randomPointInPolygon(CONFIG.bboxPolygon, CONFIG.bbox)
 }
 
 // Survival-only: uniform spawning meant players camping near the edges saw far fewer clouds than
 // the center just by virtue of the center being "surrounded" - per direct feedback, most survivors
-// ended up next to the borders because of it. 90% of spawns land in a band along one of the 4
-// edges (the full length of that edge, not just corners); the remaining 10% stay fully random so
-// the center isn't literally clear.
+// ended up next to the borders because of it. 90% of spawns try a band along one of the 4 edges of
+// the bounding envelope (the full length of that edge, not just corners); since the actual play
+// area is CONFIG.bboxPolygon (not that rectangle), a band candidate that lands outside the real
+// perimeter is discarded in favor of a fully random (but still in-polygon) point instead of forcing
+// a bad spawn - the remaining 10% always stay fully random so the center isn't literally clear.
 function randomEdgeBiasedPointInBbox() {
   if (Math.random() < 0.9) {
     const latSpan = CONFIG.bbox.north - CONFIG.bbox.south
     const lngSpan = CONFIG.bbox.east - CONFIG.bbox.west
     const bandFrac = 0.15
+    let candidate
     switch (Math.floor(Math.random() * 4)) {
       case 0: // south edge
-        return { lat: CONFIG.bbox.south + Math.random() * latSpan * bandFrac, lng: CONFIG.bbox.west + Math.random() * lngSpan }
+        candidate = { lat: CONFIG.bbox.south + Math.random() * latSpan * bandFrac, lng: CONFIG.bbox.west + Math.random() * lngSpan }
+        break
       case 1: // north edge
-        return { lat: CONFIG.bbox.north - Math.random() * latSpan * bandFrac, lng: CONFIG.bbox.west + Math.random() * lngSpan }
+        candidate = { lat: CONFIG.bbox.north - Math.random() * latSpan * bandFrac, lng: CONFIG.bbox.west + Math.random() * lngSpan }
+        break
       case 2: // west edge
-        return { lat: CONFIG.bbox.south + Math.random() * latSpan, lng: CONFIG.bbox.west + Math.random() * lngSpan * bandFrac }
+        candidate = { lat: CONFIG.bbox.south + Math.random() * latSpan, lng: CONFIG.bbox.west + Math.random() * lngSpan * bandFrac }
+        break
       default: // east edge
-        return { lat: CONFIG.bbox.south + Math.random() * latSpan, lng: CONFIG.bbox.east - Math.random() * lngSpan * bandFrac }
+        candidate = { lat: CONFIG.bbox.south + Math.random() * latSpan, lng: CONFIG.bbox.east - Math.random() * lngSpan * bandFrac }
     }
+    if (pointInPolygon(candidate.lat, candidate.lng, CONFIG.bboxPolygon)) return candidate
   }
   return randomPointInBbox()
 }
@@ -1240,7 +1255,7 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
     // initialized with the tight box here as a placeholder, overwritten immediately once mapReady.
     map.addSource('bbox-boundary', {
       type: 'geojson',
-      data: bboxOutlineGeoJSON(CONFIG.bbox)
+      data: bboxOutlineGeoJSON(CONFIG.bboxPolygon)
     })
     map.addLayer({
       id: 'bbox-boundary',
@@ -1822,10 +1837,15 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
 
   const wideBboxMode = Boolean(MODE_CONFIG[mode]?.wideBbox)
 
-  const buildCachedGraph = useCallback((cacheKey, box, allowedCities) => {
+  // `polygon`, when given, takes over containment entirely (point-in-polygon against every vertex
+  // of the street's polyline) instead of the plain lat/lng rectangle check - used for the tight
+  // area's hand-drawn perimeter; bboxWide has no polygon and stays a rectangle.
+  const buildCachedGraph = useCallback((cacheKey, box, allowedCities, polygon) => {
     const cached = graphCacheRef.current[cacheKey]
     if (cached) return cached
-    const withinBbox = (poly) => poly.every(([lat, lng]) => lat >= box.south && lat <= box.north && lng >= box.west && lng <= box.east)
+    const withinBbox = polygon
+      ? (poly) => poly.every(([lat, lng]) => pointInPolygon(lat, lng, polygon))
+      : (poly) => poly.every(([lat, lng]) => lat >= box.south && lat <= box.north && lng >= box.west && lng <= box.east)
     const filtered = rawSegments.filter((s) => allowedCities.includes(s.city) && withinBbox(s.polyline))
     const built = { segments: filtered, graph: buildGraph(filtered) }
     graphCacheRef.current[cacheKey] = built
@@ -1834,13 +1854,13 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
 
   useEffect(() => {
     if (!rawSegments) return
-    // Two bbox variants share one raw fetch: the tight curated box (most modes, Québec + enclaves)
+    // Two bbox variants share one raw fetch: the tight curated area (most modes, Québec + enclaves)
     // and the wide full-region box (Single/Team, see MODE_CONFIG - Québec + Lévis + enclaves).
     // Each is filtered+built once and cached here - switching modes back and forth in the setup
     // screen shouldn't rebuild a 20k+ segment graph every time.
     const cached = wideBboxMode
       ? buildCachedGraph('wide', CONFIG.bboxWide, ['Québec', 'Lévis', "L'Ancienne-Lorette", 'Wendake'])
-      : buildCachedGraph('tight', CONFIG.bbox, ['Québec', "L'Ancienne-Lorette", 'Wendake'])
+      : buildCachedGraph('tight', CONFIG.bbox, ['Québec', "L'Ancienne-Lorette", 'Wendake'], CONFIG.bboxPolygon)
     setSegments(cached.segments)
     setGraph(cached.graph)
   }, [rawSegments, wideBboxMode, buildCachedGraph])
@@ -2334,7 +2354,7 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
     const map = mapRef.current
     if (!map || !mapReady) return
     const source = map.getSource('bbox-boundary')
-    if (source) source.setData(bboxOutlineGeoJSON(wideBboxMode ? CONFIG.bboxWide : CONFIG.bbox))
+    if (source) source.setData(bboxOutlineGeoJSON(wideBboxMode ? rectCorners(CONFIG.bboxWide) : CONFIG.bboxPolygon))
   }, [wideBboxMode, mapReady])
 
   // Re-scatters the mega-cloud's points on every position tick (megaCloud changes every
@@ -2677,13 +2697,10 @@ export default function App({ playerName, renameName, joinRequest, spectateReque
             const behavior = ITEM_BEHAVIORS[def.id]
             let pt = null
             if (behavior?.type === 'hidden-corner') {
-              const corners = [
-                [CONFIG.bbox.north, CONFIG.bbox.west],
-                [CONFIG.bbox.north, CONFIG.bbox.east],
-                [CONFIG.bbox.south, CONFIG.bbox.west],
-                [CONFIG.bbox.south, CONFIG.bbox.east]
-              ]
-              const corner = corners[Math.floor(Math.random() * corners.length)]
+              // Finder never runs in wideBbox mode, so the play area is always CONFIG.bboxPolygon -
+              // one of its own vertices makes a more natural "corner" than the 4 rectangle corners
+              // used before.
+              const corner = CONFIG.bboxPolygon[Math.floor(Math.random() * CONFIG.bboxPolygon.length)]
               pt = pickRandomStreetPoint(graph, { near: corner, maxDistanceMeters: 4000 })
             }
             pt = pt || pickRandomStreetPoint(graph) || defaultPosition

@@ -1498,4 +1498,14 @@ body, html, #root {
   .touch-btn-turbo:active {
     background: rgba(255, 152, 0, 1);
   }
+
+  /* Centered/max-width-80% collides with .overlay-top-right's zoom/quit buttons on narrow
+     screens (e.g. the "You are it" tag message) - pin it between the two side margins instead
+     of centering so it never extends under the top-right controls. */
+  .overlay-top-title {
+    left: 12px;
+    right: 190px;
+    transform: none;
+    max-width: none;
+  }
 }
